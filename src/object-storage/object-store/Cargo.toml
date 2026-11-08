@@ -27,7 +27,7 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 mime_guess = { workspace = true }
 futures = "0.3"
-bytes = "1.5"
+bytes = "1.12.1"
 
 # Configuration
 config = "0.14"
