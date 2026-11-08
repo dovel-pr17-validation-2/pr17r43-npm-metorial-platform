@@ -1,0 +1,442 @@
+import {
+  badRequestError,
+  forbiddenError,
+  ServiceError,
+  unauthorizedError
+} from '@lowerdeck/error';
+import { createExecutionContext, provideExecutionContext } from '@lowerdeck/execution-context';
+import type { Context } from '@lowerdeck/hono';
+import { getSentry } from '@lowerdeck/sentry';
+import type {
+  RequestScopedSkillsResolver,
+  RequestScopedToolsResolver
+} from '@metorial-subspace/module-connection';
+import {
+  assertCanUseCoreOwnedResources,
+  getOwnershipAccessor,
+  internalOwnershipAccessor,
+  subspaceScopeService
+} from '@metorial-subspace/module-tenant';
+import { extractToken } from '@metorial/bearer';
+import { Instance } from '@metorial/db';
+import { generateSnowflakeId } from '@metorial/id';
+import { AuthInfo } from '@metorial/module-access';
+import {
+  consumerIntegrationService,
+  createSkillEditingTools,
+  createConsumerSkillSource,
+  enqueueMaterializeMagicMcpSessionOwnership
+} from '@metorial/module-consumer-entities';
+import {
+  ensureMagicMcpSubspaceSession,
+  magicMcpEndpointService,
+  magicMcpServerService,
+  magicMcpTokenService,
+  resolveMagicMcpTargetByIdOrAlias,
+  resolveMagicMcpTargetByIdOrAliasSafe,
+  syncMagicMcpSubspaceSession
+} from '@metorial/module-magic';
+import { Authenticator } from '@metorial/rest';
+import { authenticateAndResolveInstance } from './getSession';
+import { type ConnectionMcpAgentClient, handleMcpRequest } from './mcp';
+import { useConnectionRequestContext } from './outpost';
+
+let Sentry = getSentry();
+
+type MagicMcpTargetForRouting = Awaited<ReturnType<typeof resolveMagicMcpTargetByIdOrAlias>>;
+type MagicMcpTokenForRouting = Awaited<
+  ReturnType<typeof magicMcpTokenService.getMagicMcpTokenBySecret>
+>;
+type MagicMcpSessionOwnerConsumerProfile = Parameters<
+  (typeof consumerIntegrationService)['materializeMagicMcpSessionOwnership']
+>[0]['consumerProfile'];
+
+export type MagicMcpSubspaceSessionInfo = {
+  type: 'magic_mcp_subspace_session';
+  magicMcpTarget: MagicMcpTargetForRouting;
+  subspaceSessionId: string;
+  magicMcpToken: MagicMcpTokenForRouting | null;
+  consumerToken: MagicMcpTokenForRouting['consumerTokens'][number] | null;
+  consumerProfileForOwnership: MagicMcpSessionOwnerConsumerProfile | null;
+  agentClient?: ConnectionMcpAgentClient | null;
+};
+
+export let getMagicMcpTokenSecretFromRequest = (request: Request, url: URL) => {
+  return url.searchParams.get('key') ?? extractToken(request, url) ?? null;
+};
+
+let ensureMagicMcpTokenAccess = async (d: {
+  token: MagicMcpTokenForRouting;
+  magicMcpTarget: MagicMcpTargetForRouting;
+}) => {
+  let hasAccess = await magicMcpTokenService.checkMagicMcpTokenAccess({
+    token: d.token,
+    server: d.magicMcpTarget.type === 'server' ? d.magicMcpTarget.target : undefined,
+    endpoint: d.magicMcpTarget.type === 'endpoint' ? d.magicMcpTarget.target : undefined
+  });
+  if (!hasAccess) {
+    throw new ServiceError(
+      forbiddenError({
+        message: 'Magic MCP token does not have access to this target'
+      })
+    );
+  }
+};
+
+let resolveMagicMcpTargetFromToken = async (d: {
+  token: MagicMcpTokenForRouting;
+  currentTarget: MagicMcpTargetForRouting | null;
+}) => {
+  if (d.token.magicMcpServer && d.token.magicMcpEndpoint) {
+    throw new ServiceError(
+      badRequestError({
+        message: 'Magic MCP token must be linked to exactly one server or endpoint'
+      })
+    );
+  }
+
+  // A token-linked server only fills in a missing target, and a token-linked endpoint only
+  // replaces a missing or server target, so skip resolving when the result would be discarded.
+  if (d.token.magicMcpEndpoint) {
+    if (d.currentTarget?.type == 'endpoint') return null;
+    return await resolveMagicMcpTargetByIdOrAlias(d.token.magicMcpEndpoint.id);
+  }
+
+  if (d.token.magicMcpServer) {
+    if (d.currentTarget) return null;
+    return await resolveMagicMcpTargetByIdOrAlias(d.token.magicMcpServer.id);
+  }
+
+  return null;
+};
+
+let isMagicMcpTokenLinkedToTarget = (
+  token: MagicMcpTokenForRouting,
+  target: MagicMcpTargetForRouting
+) => {
+  if (target.type === 'server') {
+    return token.magicMcpServerOid === target.target.oid;
+  }
+
+  return token.magicMcpEndpointOid === target.target.oid;
+};
+
+let toApiKeyRequest = (request: Request, tokenSecret: string | null) => {
+  if (!tokenSecret) return request;
+  if (request.headers.get('authorization')) return request;
+
+  let headers = new Headers(request.headers);
+  headers.set('authorization', `Bearer ${tokenSecret}`);
+
+  return new Request(request, {
+    headers
+  });
+};
+
+let ensureMagicMcpApiKeyAccess = async (d: {
+  tokenSecret: string;
+  request: Request;
+  url: URL;
+  authenticate: Authenticator<AuthInfo>;
+  magicMcpTarget: MagicMcpTargetForRouting;
+}): Promise<MagicMcpSessionOwnerConsumerProfile | null> => {
+  let requestForAuth = toApiKeyRequest(d.request, d.tokenSecret);
+  let { instance, auth, organizationActor } = await authenticateAndResolveInstance(
+    requestForAuth,
+    d.url,
+    d.authenticate
+  );
+
+  if (instance.id !== d.magicMcpTarget.target.instance.id) {
+    throw new ServiceError(
+      forbiddenError({
+        message: 'API key does not have access to this magic MCP target'
+      })
+    );
+  }
+
+  if (
+    auth.type == 'machine' &&
+    auth.restrictions.type == 'instance' &&
+    (auth.machineAccess.type == 'instance_publishable' ||
+      auth.machineAccess.type == 'instance_consumer')
+  ) {
+    if (!auth.restrictions.consumer) {
+      throw new ServiceError(
+        forbiddenError({
+          message: 'Consumer token is required when using a publishable API key'
+        })
+      );
+    }
+
+    if (d.magicMcpTarget.type === 'server') {
+      await magicMcpServerService.checkConsumerReadAccess({
+        server: d.magicMcpTarget.target,
+        accessTags: auth.restrictions.consumer.accessTags
+      });
+    } else {
+      await magicMcpEndpointService.checkConsumerReadAccess({
+        endpoint: d.magicMcpTarget.target,
+        accessTags: auth.restrictions.consumer.accessTags
+      });
+    }
+
+    return auth.restrictions.consumer.consumerProfile;
+  }
+
+  let accessor = internalOwnershipAccessor;
+  if (organizationActor) {
+    let { tenant } = await subspaceScopeService.ensureForInstance(instance);
+    accessor = await getOwnershipAccessor({ tenant, organizationActor });
+  }
+
+  await assertCanUseCoreOwnedResources(accessor, [d.magicMcpTarget.target], {
+    resource: d.magicMcpTarget.type === 'server' ? 'magic MCP server' : 'magic MCP endpoint'
+  });
+
+  return null;
+};
+
+let resolveAgentClientForConsumerAuthClient = (d: {
+  consumerAuthClient: Awaited<
+    ReturnType<
+      (typeof consumerIntegrationService)['findLatestConsumerAuthClientForMagicMcpToken']
+    >
+  >;
+}): ConnectionMcpAgentClient | null => {
+  let consumerAuthClient = d.consumerAuthClient;
+  if (!consumerAuthClient) return null;
+  let consumerClient =
+    consumerAuthClient.consumerAuthClientSurfaces[0]?.consumerClient ?? null;
+
+  return {
+    name: consumerClient?.name ?? consumerAuthClient.name,
+    type: 'mcp_client_oauth',
+    foreignId: consumerClient?.id ?? consumerAuthClient.id,
+    oauthRegistrationId: consumerAuthClient.id
+  };
+};
+
+export let resolveMagicMcpSubspaceSession = async (d: {
+  magicMcpTargetIdOrAlias?: string;
+  magicMcpTarget?: MagicMcpTargetForRouting | null;
+  instanceForTokenRouting?: Instance;
+  request: Request;
+  url: URL;
+  authenticate: Authenticator<AuthInfo>;
+  ip?: string | null;
+  ua?: string | null;
+}): Promise<MagicMcpSubspaceSessionInfo> => {
+  let tokenSecret = getMagicMcpTokenSecretFromRequest(d.request, d.url);
+  if (!tokenSecret) {
+    throw new ServiceError(
+      unauthorizedError({
+        message: 'Magic MCP token or API key is required',
+        description:
+          'Provide a magic MCP token in `key` or use a Bearer API key in Authorization.'
+      })
+    );
+  }
+
+  let magicMcpTarget = d.magicMcpTarget
+    ? d.magicMcpTarget
+    : d.magicMcpTargetIdOrAlias
+      ? await resolveMagicMcpTargetByIdOrAliasSafe(d.magicMcpTargetIdOrAlias)
+      : null;
+
+  let instance = magicMcpTarget?.target.instance ?? d.instanceForTokenRouting;
+
+  let magicMcpToken = instance
+    ? await magicMcpTokenService.getMagicMcpTokenBySecret({
+        secret: tokenSecret,
+        instance
+      })
+    : null;
+
+  if (
+    magicMcpToken &&
+    (!magicMcpTarget ||
+      ((magicMcpToken.magicMcpEndpointOid || magicMcpToken.magicMcpServerOid) &&
+        !isMagicMcpTokenLinkedToTarget(magicMcpToken, magicMcpTarget)))
+  ) {
+    let tokenTarget = await resolveMagicMcpTargetFromToken({
+      token: magicMcpToken,
+      currentTarget: magicMcpTarget
+    });
+    if (tokenTarget) magicMcpTarget = tokenTarget;
+  }
+
+  if (!magicMcpTarget) {
+    throw new ServiceError(
+      badRequestError({
+        message:
+          'A server- or endpoint-specific portal route is required unless you use a target-linked magic MCP token'
+      })
+    );
+  }
+
+  let consumerProfileForOwnership: MagicMcpSessionOwnerConsumerProfile | null = null;
+
+  if (magicMcpToken) {
+    await ensureMagicMcpTokenAccess({
+      token: magicMcpToken,
+      magicMcpTarget
+    });
+
+    magicMcpTokenService
+      .recordMagicMcpTokenUse({
+        token: magicMcpToken,
+        server: magicMcpTarget.type === 'server' ? magicMcpTarget.target : undefined,
+        endpoint: magicMcpTarget.type === 'endpoint' ? magicMcpTarget.target : undefined,
+        ip: d.ip,
+        ua: d.ua
+      })
+      .catch(error => Sentry.captureException(error));
+  } else {
+    consumerProfileForOwnership = await ensureMagicMcpApiKeyAccess({
+      tokenSecret,
+      request: d.request,
+      url: d.url,
+      authenticate: d.authenticate,
+      magicMcpTarget
+    });
+  }
+
+  let subspaceSessionId = await ensureMagicMcpSubspaceSession(magicMcpTarget);
+
+  let consumerToken = magicMcpToken?.consumerTokens[0] ?? null;
+  consumerProfileForOwnership = consumerToken?.consumerProfile ?? consumerProfileForOwnership;
+
+  let consumerAuthClient =
+    magicMcpToken && consumerToken
+      ? await consumerIntegrationService.findLatestConsumerAuthClientForMagicMcpToken({
+          magicMcpToken
+        })
+      : null;
+  let agentClient = resolveAgentClientForConsumerAuthClient({ consumerAuthClient });
+
+  return {
+    type: 'magic_mcp_subspace_session',
+    magicMcpTarget,
+    subspaceSessionId,
+    magicMcpToken,
+    consumerToken,
+    consumerProfileForOwnership,
+    agentClient
+  };
+};
+
+export let resolveMagicMcpRequestExtensions = (d: {
+  sessionInfo: MagicMcpSubspaceSessionInfo;
+  context: { ip: string; ua?: string | null };
+}): {
+  requestTools?: RequestScopedToolsResolver;
+  requestSkills?: RequestScopedSkillsResolver;
+} => {
+  let target = d.sessionInfo.magicMcpTarget;
+  if (target.type !== 'endpoint') return {};
+
+  let endpoint = target.target;
+  if (!endpoint.enableSkillEditing && !endpoint.enableSkillResources) return {};
+
+  let magicMcpToken = d.sessionInfo.magicMcpToken;
+  if (magicMcpToken?.consumerTokens.length !== 1) return {};
+
+  if (
+    magicMcpToken.skillPluginOid &&
+    endpoint.skillPluginOid &&
+    magicMcpToken.skillPluginOid !== endpoint.skillPluginOid
+  ) {
+    return {};
+  }
+
+  let input = {
+    instance: endpoint.instance,
+    consumerProfile: magicMcpToken.consumerTokens[0]!.consumerProfile,
+    skillPluginOid: magicMcpToken.skillPluginOid ?? endpoint.skillPluginOid,
+    magicMcpEndpoint: endpoint,
+    context: d.context
+  };
+
+  return {
+    requestTools: endpoint.enableSkillEditing
+      ? () => createSkillEditingTools(input)
+      : undefined,
+    requestSkills: endpoint.enableSkillResources
+      ? () => createConsumerSkillSource(input)
+      : undefined
+  };
+};
+
+export let handleMagicMcpRequest = async (d: {
+  c: Context;
+  magicMcpTargetIdOrAlias?: string;
+  magicMcpTarget?: MagicMcpTargetForRouting | null;
+  instanceForTokenRouting?: Instance;
+  authenticate: Authenticator<AuthInfo>;
+}) => {
+  let context = useConnectionRequestContext(d.c);
+  let url = new URL(d.c.req.url);
+  let request = d.c.req.raw;
+
+  return provideExecutionContext(
+    createExecutionContext({
+      userAgent: context.ua ?? 'unknown',
+      ip: context.ip,
+      contextId: generateSnowflakeId('mreq'),
+      type: 'request'
+    }),
+    async () => {
+      let sessionInfo = await resolveMagicMcpSubspaceSession({
+        magicMcpTargetIdOrAlias: d.magicMcpTargetIdOrAlias,
+        magicMcpTarget: d.magicMcpTarget,
+        instanceForTokenRouting: d.instanceForTokenRouting,
+        request,
+        url,
+        authenticate: d.authenticate,
+        ip: context.ip,
+        ua: context.ua
+      });
+
+      let { requestTools, requestSkills } = resolveMagicMcpRequestExtensions({
+        sessionInfo,
+        context: { ip: context.ip, ua: context.ua }
+      });
+
+      return await handleMcpRequest(d.c, {
+        instance: sessionInfo.magicMcpTarget.target.instance,
+        sessionId: sessionInfo.subspaceSessionId,
+        agentClient: sessionInfo.agentClient,
+        requestTools,
+        requestSkills,
+        enforceIngressNetworkPolicy: true,
+        ingressIp: context.ip,
+        onSubspaceSessionResolved: async ({ subspaceSessionId }) => {
+          let magicMcpSession = await syncMagicMcpSubspaceSession(
+            sessionInfo.magicMcpTarget,
+            subspaceSessionId,
+            sessionInfo.subspaceSessionId
+          );
+          if (!sessionInfo.consumerProfileForOwnership) return;
+          if (magicMcpSession.isConsumerReconciled) return;
+
+          await enqueueMaterializeMagicMcpSessionOwnership({
+            consumerProfileOid: sessionInfo.consumerProfileForOwnership.oid.toString(),
+            magicMcpSessionOid: magicMcpSession.oid.toString(),
+            magicMcpTokenId: sessionInfo.magicMcpToken?.id,
+            magicMcpTarget:
+              sessionInfo.magicMcpTarget.type === 'server'
+                ? {
+                    type: 'server',
+                    magicMcpServerId: sessionInfo.magicMcpTarget.target.id
+                  }
+                : {
+                    type: 'endpoint',
+                    magicMcpEndpointId: sessionInfo.magicMcpTarget.target.id
+                  }
+          });
+        }
+      });
+    }
+  );
+};

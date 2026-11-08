@@ -1,0 +1,67 @@
+enum ApiKeyType {
+  organization_management_token
+  instance_access_token_secret
+  instance_access_token_publishable
+}
+
+enum ApiKeyStatus {
+  active
+  deleted
+  expired
+}
+
+enum ApiKeyKind {
+  user_created
+  system_internal
+}
+
+model ApiKeySecret {
+  oid BigInt @id @default(autoincrement())
+  id  String @unique
+
+  secret       String @unique
+  secretSha512 String @unique
+
+  createdAt DateTime  @default(now())
+  expiresAt DateTime?
+  rolledAt  DateTime?
+
+  apiKeyOid BigInt
+  apiKey    ApiKey @relation(fields: [apiKeyOid], references: [oid], onDelete: Cascade)
+}
+
+model ApiKey {
+  oid BigInt @id @default(autoincrement())
+  id  String @unique
+
+  type   ApiKeyType
+  status ApiKeyStatus
+  kind   ApiKeyKind   @default(user_created)
+
+  secretRedacted String
+  secretLength   Int
+
+  name        String
+  description String?
+  ipFilters   String[]
+
+  canRevealUntil   DateTime?
+  canRevealForever Boolean
+
+  machineAccessOid BigInt
+  machineAccess    MachineAccess @relation(fields: [machineAccessOid], references: [oid], onDelete: Cascade)
+
+  deletedAt  DateTime?
+  lastUsedAt DateTime?
+  expiresAt  DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @default(now()) @updatedAt
+
+  secrets                       ApiKeySecret[]
+  consumerSurfacePublishableKey ConsumerSurface?         @relation("ConsumerSurfacePublishableApiKey")
+  createdEmailSends             ApiKeyCreatedEmailSend[]
+  expiredEmailSends             ApiKeyExpiredEmailSend[]
+
+  @@index([expiresAt])
+  @@index([status])
+}

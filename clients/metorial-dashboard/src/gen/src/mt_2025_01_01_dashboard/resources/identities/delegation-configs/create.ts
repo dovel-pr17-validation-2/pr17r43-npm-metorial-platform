@@ -1,0 +1,41 @@
+import { mapObject } from '@metorial/util-resource-mapper/compact';
+
+export type IdentitiesDelegationConfigsCreateOutput = {
+  object: 'identity.delegation_config';
+  id: string;
+  status: 'active' | 'archived' | 'deleted';
+  isDefault: boolean;
+  name: string | null;
+  description: string | null;
+  metadata: Record<string, any> | null;
+  subDelegationBehavior: 'allow' | 'deny' | 'require_consent';
+  subDelegationDepth: number;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+export let mapIdentitiesDelegationConfigsCreateOutput =
+  /* @__PURE__ */ mapObject<IdentitiesDelegationConfigsCreateOutput>(
+    [
+      'is_default',
+      'sub_delegation_behavior',
+      'sub_delegation_depth',
+      'created_at',
+      'updated_at'
+    ],
+    1
+  );
+
+export type IdentitiesDelegationConfigsCreateBody = {
+  name?: string | undefined;
+  description?: string | undefined;
+  metadata?: Record<string, any> | undefined;
+  subDelegationBehavior: 'allow' | 'deny' | 'require_consent';
+  subDelegationDepth?: number | undefined;
+};
+
+export let mapIdentitiesDelegationConfigsCreateBody =
+  /* @__PURE__ */ mapObject<IdentitiesDelegationConfigsCreateBody>([
+    'sub_delegation_behavior',
+    'sub_delegation_depth'
+  ]);

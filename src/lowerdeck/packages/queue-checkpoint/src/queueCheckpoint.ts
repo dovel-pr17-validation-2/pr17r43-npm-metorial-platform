@@ -1,0 +1,108 @@
+export interface QueueCheckpointRow {
+  queue: string;
+  processedThrough: Date;
+}
+
+export interface QueueCheckpointDelegate {
+  findUnique(args: { where: { queue: string } }): Promise<QueueCheckpointRow | null>;
+  create(args: { data: QueueCheckpointRow }): Promise<unknown>;
+  updateMany(args: {
+    where: { queue: string; processedThrough: { lt: Date } };
+    data: { processedThrough: Date };
+  }): Promise<{ count: number }>;
+  upsert(args: {
+    where: { queue: string };
+    create: QueueCheckpointRow;
+    update: { processedThrough: Date };
+  }): Promise<unknown>;
+}
+
+export interface QueueCheckpointDb {
+  queueCheckpoint: QueueCheckpointDelegate;
+}
+
+export let DEFAULT_CHECKPOINT_OVERLAP_MS = 5 * 60_000;
+export let DEFAULT_FULL_PASS_INTERVAL_MS = 7 * 24 * 60 * 60_000;
+
+export let createQueueCheckpoint = (d: {
+  db: QueueCheckpointDb;
+  queue: string;
+  overlapMs?: number;
+  maxLookbackMs?: number;
+}) => {
+  let overlapMs = d.overlapMs ?? DEFAULT_CHECKPOINT_OVERLAP_MS;
+  let fullPassMarker = `${d.queue}#full-pass`;
+
+  let isFullPassDue = async (intervalMs = DEFAULT_FULL_PASS_INTERVAL_MS) => {
+    let row = await d.db.queueCheckpoint.findUnique({ where: { queue: fullPassMarker } });
+    if (!row) return true;
+
+    return row.processedThrough.getTime() <= Date.now() - intervalMs;
+  };
+
+  return {
+    queue: d.queue,
+
+    // `undefined` means "no floor" — the caller should do a full sweep.
+    since: async (): Promise<Date | undefined> => {
+      let row = await d.db.queueCheckpoint.findUnique({ where: { queue: d.queue } });
+      if (!row) return undefined;
+
+      let since = new Date(row.processedThrough.getTime() - overlapMs);
+
+      if (d.maxLookbackMs != null) {
+        let floor = new Date(Date.now() - d.maxLookbackMs);
+        if (since < floor) return floor;
+      }
+
+      return since;
+    },
+
+    commit: async (processedThrough: Date) => {
+      let updated = await d.db.queueCheckpoint.updateMany({
+        where: { queue: d.queue, processedThrough: { lt: processedThrough } },
+        data: { processedThrough }
+      });
+      if (updated.count > 0) return;
+
+      let row = await d.db.queueCheckpoint.findUnique({ where: { queue: d.queue } });
+      if (row) return;
+
+      try {
+        await d.db.queueCheckpoint.create({
+          data: { queue: d.queue, processedThrough }
+        });
+      } catch {
+        await d.db.queueCheckpoint.updateMany({
+          where: { queue: d.queue, processedThrough: { lt: processedThrough } },
+          data: { processedThrough }
+        });
+      }
+    },
+
+    isFullPassDue,
+
+    claimFullPass: async (intervalMs = DEFAULT_FULL_PASS_INTERVAL_MS): Promise<boolean> => {
+      if (!(await isFullPassDue(intervalMs))) return false;
+
+      let now = new Date();
+      await d.db.queueCheckpoint.upsert({
+        where: { queue: fullPassMarker },
+        create: { queue: fullPassMarker, processedThrough: now },
+        update: { processedThrough: now }
+      });
+
+      return true;
+    },
+
+    reset: async () => {
+      await d.db.queueCheckpoint.upsert({
+        where: { queue: d.queue },
+        create: { queue: d.queue, processedThrough: new Date(0) },
+        update: { processedThrough: new Date(0) }
+      });
+    }
+  };
+};
+
+export type QueueCheckpoint = ReturnType<typeof createQueueCheckpoint>;

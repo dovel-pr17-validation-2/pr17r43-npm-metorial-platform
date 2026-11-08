@@ -1,0 +1,749 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+let mocks = vi.hoisted(() => ({
+  tenantFind: vi.fn(),
+  environmentFind: vi.fn(),
+  projectUpdate: vi.fn(),
+  instanceUpdate: vi.fn(),
+  organizationFind: vi.fn(),
+  organizationUpdate: vi.fn(),
+  organizationActorFind: vi.fn(),
+  organizationActorUpdate: vi.fn(),
+  resourceTenantFind: vi.fn(),
+  resourceGroupFind: vi.fn(),
+  resourceActorFind: vi.fn(),
+  resourceActorCreate: vi.fn(),
+  projectFindFirst: vi.fn(),
+  projectFindUniqueOrThrow: vi.fn(),
+  tenantUpsert: vi.fn(),
+  environmentUpsert: vi.fn(),
+  solutionUpsert: vi.fn(),
+  findActorForOrganizationActor: vi.fn(),
+  upsertActor: vi.fn(),
+  generateId: vi.fn()
+}));
+
+vi.mock('@lowerdeck/cache', () => ({
+  createCachedFunction: vi.fn((opts: { provider: (i: any) => Promise<unknown> }) =>
+    Object.assign(
+      vi.fn((i: any) => opts.provider(i)),
+      { clearAndWait: vi.fn() }
+    )
+  )
+}));
+
+import { createCachedFunction } from '@lowerdeck/cache';
+
+vi.mock('@lowerdeck/service', () => ({
+  Service: {
+    create: vi.fn((_name, factory) => ({
+      build: () => factory()
+    }))
+  }
+}));
+
+vi.mock('@metorial/db', () => ({
+  ID: { generateId: mocks.generateId },
+  withUniqueConstraintRecovery: async <T>(
+    write: () => Promise<T>,
+    recover: () => Promise<T | null>
+  ) => {
+    try {
+      return await write();
+    } catch (error) {
+      if ((error as { code?: string })?.code !== 'P2002') throw error;
+
+      let existing = await recover();
+      if (!existing) throw error;
+
+      return existing;
+    }
+  }
+}));
+
+vi.mock('@metorial-subspace/db', () => ({
+  db: {
+    tenant: { findUnique: mocks.tenantFind },
+    environment: { findUnique: mocks.environmentFind }
+  }
+}));
+
+vi.mock('../env', () => ({
+  env: { service: { SUBSPACE_SOLUTION: 'metorial' } }
+}));
+
+vi.mock('../lib/metorialDb', () => ({
+  metorialDb: {
+    project: {
+      findUniqueOrThrow: mocks.projectFindUniqueOrThrow,
+      findFirst: mocks.projectFindFirst,
+      update: mocks.projectUpdate
+    },
+    instance: {
+      findUniqueOrThrow: vi.fn(),
+      update: mocks.instanceUpdate
+    },
+    organization: {
+      findUniqueOrThrow: mocks.organizationFind,
+      update: mocks.organizationUpdate
+    },
+    organizationActor: {
+      findUniqueOrThrow: mocks.organizationActorFind,
+      update: mocks.organizationActorUpdate
+    },
+    resourceTenant: {
+      findUniqueOrThrow: mocks.resourceTenantFind,
+      upsert: vi.fn()
+    },
+    resourceGroup: {
+      findUniqueOrThrow: mocks.resourceGroupFind,
+      upsert: vi.fn()
+    },
+    resourceActor: {
+      findFirst: mocks.resourceActorFind,
+      create: mocks.resourceActorCreate
+    }
+  }
+}));
+
+vi.mock('./tenant', () => ({
+  tenantService: { upsertTenant: mocks.tenantUpsert }
+}));
+
+vi.mock('./environment', () => ({
+  environmentService: { upsertEnvironment: mocks.environmentUpsert }
+}));
+
+vi.mock('./solution', () => ({
+  solutionService: { upsertSolution: mocks.solutionUpsert }
+}));
+
+vi.mock('./actor', () => ({
+  actorService: {
+    findActorForOrganizationActor: mocks.findActorForOrganizationActor,
+    upsertActor: mocks.upsertActor
+  }
+}));
+
+import { subspaceScopeService } from './subspaceScope';
+
+let cacheConfigs = vi.mocked(createCachedFunction).mock.calls.map(([opts]) => opts as any);
+
+let scopeCaches = vi.mocked(createCachedFunction).mock.results.map(result => result.value);
+
+let resourceTenant = {
+  oid: 100n,
+  id: 'rtn_100',
+  identifier: 'mte-pro-2',
+  name: 'Project'
+};
+let resourceGroup = {
+  oid: 200n,
+  id: 'rgr_200',
+  identifier: 'mte-ins-3',
+  name: 'Production',
+  type: 'production'
+};
+let canonicalTenant = {
+  oid: 20n,
+  id: 'ktn_canonical',
+  identifier: 'mte-pro-2'
+};
+let canonicalEnvironment = {
+  oid: 30n,
+  id: 'ken_canonical',
+  identifier: 'mte-ins-3',
+  tenantOid: 20n
+};
+
+let makeProject = (overrides: Record<string, unknown> = {}) =>
+  ({
+    oid: 2n,
+    id: 'prj_2',
+    name: 'Project',
+    onlyAllowTrustedProviders: false,
+    hidePublicRemoteProviders: false,
+    organizationOid: 1n,
+    resourceTenantOid: 100n,
+    instances: [],
+    ...overrides
+  }) as any;
+
+describe('Subspace scope provisioning', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.resourceTenantFind.mockResolvedValue(resourceTenant);
+    mocks.resourceGroupFind.mockResolvedValue(resourceGroup);
+    mocks.tenantUpsert.mockResolvedValue(canonicalTenant);
+    mocks.environmentUpsert.mockResolvedValue(canonicalEnvironment);
+    mocks.organizationFind.mockResolvedValue({
+      id: 'org_1',
+      subspaceTenantIds: ['ktn_canonical']
+    });
+    mocks.solutionUpsert.mockResolvedValue({
+      oid: 1,
+      id: 'kso_1',
+      identifier: 'metorial'
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it.each([false, true])(
+    'uses the project policy %s when provisioning its tenant',
+    async value => {
+      await subspaceScopeService.ensureForProjectUncached(
+        makeProject({ hidePublicRemoteProviders: value })
+      );
+
+      expect(mocks.tenantUpsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          input: expect.objectContaining({ hidePublicRemoteProviders: value })
+        })
+      );
+    }
+  );
+
+  it.each([
+    { value: null, environment: 'development', expected: true },
+    { value: null, environment: 'production', expected: false },
+    { value: true, environment: 'production', expected: true },
+    { value: false, environment: 'development', expected: false }
+  ])(
+    'resolves the project sessionless MCP setting $value in $environment on tenant creation',
+    async ({ value, environment, expected }) => {
+      vi.stubEnv('METORIAL_ENV', environment);
+
+      await subspaceScopeService.ensureForProjectUncached(
+        makeProject({ sessionlessMcpEnabled: value })
+      );
+
+      expect(mocks.tenantUpsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          input: expect.objectContaining({ sessionlessMcpEnabledOnCreate: expected })
+        })
+      );
+    }
+  );
+
+  it('clears cached project and instance scopes after an admin policy change', async () => {
+    let instance = { id: 'ins_3' };
+    let project = makeProject({ instances: [instance] });
+
+    await subspaceScopeService.clearProjectScopeCache(project);
+
+    expect(scopeCaches[0].clearAndWait).toHaveBeenCalledWith({ project });
+    expect(scopeCaches[1].clearAndWait).toHaveBeenCalledWith({ instance });
+  });
+
+  it('reloads partial projects before provisioning their tenants', async () => {
+    mocks.projectFindUniqueOrThrow.mockResolvedValue(
+      makeProject({ hidePublicRemoteProviders: false })
+    );
+
+    await subspaceScopeService.ensureForProjectUncached(
+      makeProject({ hidePublicRemoteProviders: undefined })
+    );
+
+    expect(mocks.projectFindUniqueOrThrow).toHaveBeenCalledWith({
+      where: { id: 'prj_2' },
+      include: { instances: true }
+    });
+    expect(mocks.tenantUpsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        input: expect.objectContaining({ hidePublicRemoteProviders: false })
+      })
+    );
+  });
+
+  it('asserts and leaves an existing project link untouched', async () => {
+    let project = makeProject({
+      internalTenantIdentifier: 'mte-pro-2',
+      subspaceTenantId: 'ktn_canonical'
+    });
+    mocks.tenantFind.mockResolvedValue({ identifier: 'mte-pro-2' });
+
+    await subspaceScopeService.ensureForProject(project);
+
+    expect(mocks.projectUpdate).not.toHaveBeenCalled();
+    expect(mocks.tenantUpsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        input: expect.objectContaining({ identifier: 'mte-pro-2', skipNetworks: true })
+      })
+    );
+  });
+
+  it('stores the project reference on the tenant and the instance reference on its environments', async () => {
+    let instance = {
+      oid: 3n,
+      id: 'ins_3',
+      name: 'Production',
+      type: 'production',
+      organizationOid: 1n,
+      projectOid: 2n,
+      resourceGroupOid: 200n,
+      internalTenantIdentifier: 'mte-pro-2',
+      internalEnvironmentIdentifier: 'mte-ins-3',
+      subspaceTenantId: 'ktn_canonical',
+      subspaceEnvironmentId: 'ken_canonical'
+    } as any;
+    let project = makeProject({
+      internalTenantIdentifier: 'mte-pro-2',
+      subspaceTenantId: 'ktn_canonical',
+      instances: [instance]
+    });
+    instance.project = project;
+    instance.organization = { oid: 1n, id: 'org_1', subspaceTenantIds: ['ktn_canonical'] };
+    mocks.tenantFind.mockResolvedValue({ oid: 20n, identifier: 'mte-pro-2' });
+    mocks.environmentFind.mockResolvedValue({
+      identifier: 'mte-ins-3',
+      tenantOid: 20n
+    });
+
+    await subspaceScopeService.ensureForInstance(instance);
+
+    expect(mocks.tenantUpsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        input: expect.objectContaining({
+          projectOid: 2n,
+          skipNetworks: true,
+          environments: [expect.objectContaining({ instanceOid: 3n })]
+        })
+      })
+    );
+    expect(mocks.environmentUpsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        input: expect.objectContaining({ instanceOid: 3n })
+      })
+    );
+  });
+
+  it('caches project and instance scopes for a minute', () => {
+    expect(cacheConfigs.map(opts => opts.name).sort()).toEqual([
+      'subspaceScope:instance',
+      'subspaceScope:project'
+    ]);
+    expect(cacheConfigs.every(opts => opts.ttlSeconds === 60)).toBe(true);
+  });
+
+  let makeLinkedInstance = (overrides: Record<string, unknown> = {}) => {
+    let instance = {
+      oid: 3n,
+      id: 'ins_3',
+      name: 'Production',
+      type: 'production',
+      organizationOid: 1n,
+      projectOid: 2n,
+      resourceGroupOid: 200n,
+      internalTenantIdentifier: 'mte-pro-2',
+      internalEnvironmentIdentifier: 'mte-ins-3',
+      subspaceTenantId: 'ktn_canonical',
+      subspaceEnvironmentId: 'ken_canonical',
+      ...overrides
+    } as any;
+    instance.project = makeProject({
+      internalTenantIdentifier: 'mte-pro-2',
+      subspaceTenantId: 'ktn_canonical',
+      instances: [instance]
+    });
+    instance.organization = { oid: 1n, id: 'org_1', subspaceTenantIds: ['ktn_canonical'] };
+    mocks.tenantFind.mockResolvedValue({ oid: 20n, identifier: 'mte-pro-2' });
+    mocks.environmentFind.mockResolvedValue({ identifier: 'mte-ins-3', tenantOid: 20n });
+    return instance;
+  };
+
+  it('skips rewriting an instance that is already linked and was synced recently', async () => {
+    await subspaceScopeService.ensureForInstance(
+      makeLinkedInstance({ lastSubspaceSyncAt: new Date() })
+    );
+
+    expect(mocks.instanceUpdate).not.toHaveBeenCalled();
+  });
+
+  it('refreshes an instance link that has not been synced for a while', async () => {
+    await subspaceScopeService.ensureForInstance(
+      makeLinkedInstance({ lastSubspaceSyncAt: new Date(Date.now() - 60 * 60 * 1000) })
+    );
+
+    expect(mocks.instanceUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it('writes the instance link when it has never been synced', async () => {
+    await subspaceScopeService.ensureForInstance(makeLinkedInstance());
+
+    expect(mocks.instanceUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses to provision when the project carries an identifier its oid does not produce', async () => {
+    let project = makeProject({
+      internalTenantIdentifier: 'mte-pro-999',
+      subspaceTenantId: 'ktn_wrong'
+    });
+
+    await expect(subspaceScopeService.ensureForProject(project)).rejects.toThrow(
+      'expected mte-pro-2'
+    );
+    expect(mocks.tenantUpsert).not.toHaveBeenCalled();
+    expect(mocks.projectUpdate).not.toHaveBeenCalled();
+  });
+
+  it('refuses to provision a project whose tenant link resolves elsewhere', async () => {
+    let project = makeProject({
+      internalTenantIdentifier: 'mte-pro-2',
+      subspaceTenantId: 'ktn_other'
+    });
+    mocks.tenantFind.mockResolvedValue({ identifier: 'mte-pro-77' });
+
+    await expect(subspaceScopeService.ensureForProject(project)).rejects.toThrow(
+      'linked to subspace tenant mte-pro-77, not mte-pro-2'
+    );
+    expect(mocks.tenantUpsert).not.toHaveBeenCalled();
+    expect(mocks.projectUpdate).not.toHaveBeenCalled();
+  });
+
+  it('provisions a project whose tenant link points at a tenant that is gone', async () => {
+    let project = makeProject({
+      internalTenantIdentifier: 'mte-pro-2',
+      subspaceTenantId: 'ktn_removed'
+    });
+    mocks.tenantFind.mockResolvedValue(null);
+
+    await subspaceScopeService.ensureForProject(project);
+
+    expect(mocks.tenantUpsert).toHaveBeenCalled();
+  });
+
+  it('refuses to provision an instance whose environment link resolves elsewhere', async () => {
+    let project = makeProject({
+      internalTenantIdentifier: 'mte-pro-2',
+      subspaceTenantId: 'ktn_canonical'
+    });
+    let instance = {
+      oid: 3n,
+      id: 'ins_3',
+      name: 'Production',
+      type: 'production',
+      organizationOid: 1n,
+      projectOid: 2n,
+      resourceGroupOid: 200n,
+      internalTenantIdentifier: 'mte-pro-2',
+      internalEnvironmentIdentifier: 'mte-ins-3',
+      subspaceTenantId: 'ktn_canonical',
+      subspaceEnvironmentId: 'ken_other',
+      project,
+      organization: { oid: 1n, id: 'org_1', subspaceTenantIds: ['ktn_canonical'] }
+    } as any;
+    project.instances = [instance];
+    mocks.tenantFind.mockResolvedValue({ oid: 20n, identifier: 'mte-pro-2' });
+    mocks.environmentFind.mockResolvedValue({ identifier: 'mte-ins-88', tenantOid: 20n });
+
+    await expect(subspaceScopeService.ensureForInstance(instance)).rejects.toThrow(
+      'linked to subspace environment mte-ins-88, not mte-ins-3'
+    );
+    expect(mocks.environmentUpsert).not.toHaveBeenCalled();
+    expect(mocks.instanceUpdate).not.toHaveBeenCalled();
+  });
+
+  it('refuses to provision an instance whose environment sits under another tenant', async () => {
+    let project = makeProject({
+      internalTenantIdentifier: 'mte-pro-2',
+      subspaceTenantId: 'ktn_canonical'
+    });
+    let instance = {
+      oid: 3n,
+      id: 'ins_3',
+      name: 'Production',
+      type: 'production',
+      organizationOid: 1n,
+      projectOid: 2n,
+      resourceGroupOid: 200n,
+      internalTenantIdentifier: 'mte-pro-2',
+      internalEnvironmentIdentifier: 'mte-ins-3',
+      subspaceTenantId: 'ktn_canonical',
+      subspaceEnvironmentId: 'ken_canonical',
+      project,
+      organization: { oid: 1n, id: 'org_1', subspaceTenantIds: ['ktn_canonical'] }
+    } as any;
+    project.instances = [instance];
+    mocks.tenantFind.mockResolvedValue({ oid: 20n, identifier: 'mte-pro-2' });
+    mocks.environmentFind.mockResolvedValue({ identifier: 'mte-ins-3', tenantOid: 999n });
+
+    await expect(subspaceScopeService.ensureForInstance(instance)).rejects.toThrow(
+      'does not sit beneath tenant mte-pro-2'
+    );
+    expect(mocks.environmentUpsert).not.toHaveBeenCalled();
+  });
+
+  it('provisions a project that has never been linked to a tenant', async () => {
+    let project = makeProject({
+      internalTenantIdentifier: null,
+      subspaceTenantId: null
+    });
+
+    await subspaceScopeService.ensureForProject(project);
+
+    expect(mocks.tenantUpsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        input: expect.objectContaining({ identifier: 'mte-pro-2' })
+      })
+    );
+    expect(mocks.projectUpdate).toHaveBeenCalledWith({
+      where: { id: 'prj_2' },
+      data: {
+        internalTenantIdentifier: 'mte-pro-2',
+        subspaceTenantId: 'ktn_canonical'
+      }
+    });
+  });
+
+  it('tracks the tenant on its organization when the organization does not list it yet', async () => {
+    mocks.organizationFind.mockResolvedValue({ id: 'org_1', subspaceTenantIds: [] });
+
+    await subspaceScopeService.ensureForProject(
+      makeProject({
+        internalTenantIdentifier: 'mte-pro-2',
+        subspaceTenantId: 'ktn_canonical'
+      })
+    );
+
+    expect(mocks.organizationUpdate).toHaveBeenCalledWith({
+      where: { id: 'org_1' },
+      data: { subspaceTenantIds: { push: 'ktn_canonical' } }
+    });
+  });
+});
+
+describe('Organization actor tenant linking', () => {
+  let tenant = {
+    oid: 20n,
+    id: 'ktn_20',
+    identifier: 'mte-pro-2'
+  };
+  let organizationActor = {
+    oid: 4n,
+    id: 'oac_4',
+    name: 'User',
+    type: 'member',
+    internalActorIdentifier: 'mte-oac-oac_4',
+    subspaceActorId: 'act_other_tenant'
+  };
+  let resourceActor = {
+    oid: 300n,
+    id: 'rac_300',
+    identifier: 'mte-oac-oac_4'
+  };
+  let tenantActor = {
+    oid: 40n,
+    id: 'act_40',
+    identifier: 'mte-oac-oac_4',
+    organizationActorOid: 4n
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.projectFindFirst.mockResolvedValue({ oid: 2n });
+    mocks.resourceActorFind.mockResolvedValue(resourceActor);
+    mocks.findActorForOrganizationActor.mockResolvedValue(null);
+    mocks.upsertActor.mockResolvedValue(tenantActor);
+  });
+
+  it('creates a tenant actor for this tenant even when Metorial already stores another tenant actor id', async () => {
+    await subspaceScopeService.ensureForOrganizationActor({
+      tenant: tenant as any,
+      organizationActor: organizationActor as any
+    });
+
+    expect(mocks.findActorForOrganizationActor).toHaveBeenCalledWith({
+      tenant,
+      organizationActor,
+      identifier: 'mte-oac-oac_4'
+    });
+    expect(mocks.resourceActorFind).toHaveBeenCalledWith({
+      where: {
+        organizationActorOid: 4n,
+        projectOid: 2n
+      }
+    });
+    expect(mocks.upsertActor).toHaveBeenCalledWith({
+      tenant,
+      input: expect.objectContaining({
+        identifier: 'mte-oac-oac_4',
+        name: 'User',
+        type: 'external',
+        organizationActorId: 'oac_4',
+        organizationActorOid: 4n,
+        resourceActorId: 'rac_300',
+        resourceActorIdentifier: 'mte-oac-oac_4'
+      })
+    });
+    expect(mocks.organizationActorUpdate).not.toHaveBeenCalled();
+  });
+
+  it('creates the resource actor when none exists', async () => {
+    mocks.resourceActorFind.mockResolvedValue(null);
+    mocks.resourceActorCreate.mockResolvedValue(resourceActor);
+    mocks.generateId.mockResolvedValue('rac_300');
+
+    await subspaceScopeService.ensureForOrganizationActor({
+      tenant: tenant as any,
+      organizationActor: organizationActor as any
+    });
+
+    expect(mocks.resourceActorCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        projectOid: 2n,
+        identifier: 'mte-oac-oac_4',
+        organizationActorOid: 4n
+      })
+    });
+    expect(mocks.upsertActor).toHaveBeenCalledWith({
+      tenant,
+      input: expect.objectContaining({ resourceActorId: 'rac_300' })
+    });
+  });
+
+  it('reuses the resource actor created by a concurrent writer on a unique constraint conflict', async () => {
+    mocks.resourceActorFind.mockResolvedValueOnce(null).mockResolvedValueOnce(resourceActor);
+    mocks.resourceActorCreate.mockRejectedValue({ code: 'P2002' });
+
+    await subspaceScopeService.ensureForOrganizationActor({
+      tenant: tenant as any,
+      organizationActor: organizationActor as any
+    });
+
+    expect(mocks.resourceActorFind).toHaveBeenLastCalledWith({
+      where: {
+        projectOid: 2n,
+        OR: [{ organizationActorOid: 4n }, { identifier: 'mte-oac-oac_4' }]
+      }
+    });
+    expect(mocks.upsertActor).toHaveBeenCalledWith({
+      tenant,
+      input: expect.objectContaining({
+        resourceActorId: 'rac_300',
+        resourceActorIdentifier: 'mte-oac-oac_4'
+      })
+    });
+  });
+
+  it.each([
+    { target: 'ResourceActor_pkey' },
+    { target: ['oid'] },
+    {
+      driverAdapterError: {
+        cause: {
+          kind: 'UniqueConstraintViolation',
+          constraint: { index: 'ResourceActor_pkey' }
+        }
+      }
+    },
+    {
+      driverAdapterError: {
+        cause: { kind: 'UniqueConstraintViolation', constraint: { fields: ['oid'] } }
+      }
+    }
+  ])('retries an unrelated resource actor primary key collision (%j)', async meta => {
+    mocks.resourceActorFind.mockResolvedValue(null);
+    mocks.resourceActorCreate
+      .mockRejectedValueOnce({ code: 'P2002', meta })
+      .mockResolvedValueOnce(resourceActor);
+    mocks.generateId.mockResolvedValueOnce('rac_conflict').mockResolvedValueOnce('rac_300');
+
+    await subspaceScopeService.ensureForOrganizationActor({
+      tenant: tenant as any,
+      organizationActor: organizationActor as any
+    });
+
+    expect(mocks.resourceActorCreate).toHaveBeenCalledTimes(2);
+    expect(mocks.resourceActorCreate.mock.calls.map(([input]) => input.data.id)).toEqual([
+      'rac_conflict',
+      'rac_300'
+    ]);
+    expect(mocks.upsertActor).toHaveBeenCalledWith({
+      tenant,
+      input: expect.objectContaining({ resourceActorId: 'rac_300' })
+    });
+  });
+
+  it('stops retrying repeated primary key collisions', async () => {
+    let error = { code: 'P2002', meta: { target: 'ResourceActor_pkey' } };
+    mocks.resourceActorFind.mockResolvedValue(null);
+    mocks.resourceActorCreate.mockRejectedValue(error);
+
+    await expect(
+      subspaceScopeService.ensureForOrganizationActor({
+        tenant: tenant as any,
+        organizationActor: organizationActor as any
+      })
+    ).rejects.toBe(error);
+
+    expect(mocks.resourceActorCreate).toHaveBeenCalledTimes(3);
+    expect(mocks.upsertActor).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { code: 'P2002', meta: { target: ['id'] } },
+    { code: 'P2003', meta: { target: 'ResourceActor_pkey' } }
+  ])('does not retry unrelated database errors (%j)', async error => {
+    mocks.resourceActorFind.mockResolvedValue(null);
+    mocks.resourceActorCreate.mockRejectedValue(error);
+
+    await expect(
+      subspaceScopeService.ensureForOrganizationActor({
+        tenant: tenant as any,
+        organizationActor: organizationActor as any
+      })
+    ).rejects.toBe(error);
+
+    expect(mocks.resourceActorCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it('rethrows unique constraint errors when no conflicting resource actor can be found', async () => {
+    mocks.resourceActorFind.mockResolvedValue(null);
+    mocks.resourceActorCreate.mockRejectedValue({ code: 'P2002' });
+
+    await expect(
+      subspaceScopeService.ensureForOrganizationActor({
+        tenant: tenant as any,
+        organizationActor: organizationActor as any
+      })
+    ).rejects.toEqual({ code: 'P2002' });
+  });
+
+  it('reuses an existing tenant actor in this tenant and backfills the organization actor relation', async () => {
+    mocks.findActorForOrganizationActor.mockResolvedValue({
+      id: 'act_existing',
+      organizationActorOid: null
+    });
+    mocks.upsertActor.mockResolvedValue({
+      ...tenantActor,
+      id: 'act_existing'
+    });
+
+    await subspaceScopeService.ensureForOrganizationActor({
+      tenant: tenant as any,
+      organizationActor: {
+        ...organizationActor,
+        subspaceActorId: null,
+        internalActorIdentifier: null
+      } as any
+    });
+
+    expect(mocks.upsertActor).toHaveBeenCalledWith({
+      tenant,
+      input: expect.objectContaining({
+        id: 'act_existing',
+        organizationActorOid: 4n
+      })
+    });
+    expect(mocks.organizationActorUpdate).toHaveBeenCalledWith({
+      where: { id: 'oac_4' },
+      data: {
+        internalActorIdentifier: 'mte-oac-oac_4',
+        subspaceActorId: 'act_existing'
+      }
+    });
+  });
+});

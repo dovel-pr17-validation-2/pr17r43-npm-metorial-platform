@@ -1,0 +1,194 @@
+import { documentService } from '@metorial/module-documents';
+import { filePurposeService, fileService } from '@metorial/module-file';
+import {
+  getSkillDocumentTitle,
+  isSkillDocumentPath,
+  skillService
+} from '@metorial/module-skill';
+import {
+  normalizeStorePath,
+  storeItemMutationService,
+  stripDisallowedStorePathCharacters
+} from '@metorial/module-store';
+import type { AuditScope } from '@metorial/audit-scope';
+import type { Instance, Prisma, Project, ResourceActor, StorePathMode } from '@metorial/db';
+import type { ResourceAuthorization } from '@metorial/module-access';
+import { parseSkillDocumentFrontmatter } from '@metorial/module-skill/frontmatter';
+import { posix as path } from 'node:path';
+import { getRelativeSkillPath, shouldImportSkillPath } from './discovery';
+import { getCodeBucketFiles } from './repository';
+
+let maxSkillFiles = 1000;
+let maxSkillBytes = 100 * 1024 * 1024;
+
+let isRecord = (value: unknown): value is Record<string, unknown> =>
+  !!value && typeof value === 'object' && !Array.isArray(value);
+
+let optionalString = (value: unknown) =>
+  typeof value === 'string' && value.trim() ? value.trim() : undefined;
+
+let getImportedStorePath = (relativePath: string, mode: StorePathMode) => {
+  let stripped = stripDisallowedStorePathCharacters(relativePath);
+  let name = stripped.split('/').at(-1)!.trim();
+  if (!name || /^\.+$/.test(name)) return null;
+
+  return normalizeStorePath({ path: stripped, kind: 'file', mode }).path;
+};
+
+export let parseImportedSkillMetadata = (d: {
+  content: string;
+  rootPath: string;
+  repositoryName?: string | null;
+}) => {
+  let { frontmatter } = parseSkillDocumentFrontmatter(d.content);
+  let rootName = d.rootPath === '/' ? d.repositoryName : path.basename(d.rootPath);
+  let name = optionalString(frontmatter.name) ?? rootName ?? 'Imported skill';
+
+  return {
+    name,
+    description: optionalString(frontmatter.description),
+    license: optionalString(frontmatter.license),
+    compatibility: optionalString(frontmatter.compatibility),
+    metadata: isRecord(frontmatter.metadata)
+      ? (frontmatter.metadata as Prisma.InputJsonValue)
+      : undefined
+  };
+};
+
+export let materializeImportedSkill = async (d: {
+  project: Project;
+  instance: Instance;
+  auditScope: AuditScope;
+  codeBucketId: string;
+  skillId: string;
+  rootPath: string;
+  repositoryName?: string | null;
+  actor?: ResourceActor;
+  authorization?: ResourceAuthorization;
+  onSkillCreated?: (
+    skill: Awaited<ReturnType<typeof skillService.createSkill>>
+  ) => void | Promise<void>;
+  onProgress?: () => void | Promise<void>;
+}) => {
+  let authorization = d.authorization ?? {
+    type: 'privileged' as const,
+    resourceActor: d.actor
+  };
+  let bucketFiles = await getCodeBucketFiles({
+    codeBucketId: d.codeBucketId,
+    prefix: d.rootPath === '/' ? '' : d.rootPath,
+    maxFiles: maxSkillFiles,
+    maxTotalBytes: maxSkillBytes,
+    include: file => {
+      let relativePath = getRelativeSkillPath(d.rootPath, file.path);
+      return !!relativePath && shouldImportSkillPath(relativePath);
+    },
+    onProgress: d.onProgress
+  });
+  let files = bucketFiles
+    .map(file => ({
+      ...file,
+      relativePath: getRelativeSkillPath(d.rootPath, file.path)
+    }))
+    .filter(
+      (file): file is typeof file & { relativePath: string } =>
+        !!file.relativePath && shouldImportSkillPath(file.relativePath)
+    )
+    .sort((a, b) => {
+      if (a.relativePath === '/SKILL.md') return -1;
+      if (b.relativePath === '/SKILL.md') return 1;
+      return a.relativePath.localeCompare(b.relativePath);
+    });
+
+  if (files.length > maxSkillFiles) throw new Error('Imported skill contains too many files');
+  let totalBytes = files.reduce((total, file) => total + file.content.byteLength, 0);
+  if (totalBytes > maxSkillBytes) throw new Error('Imported skill is too large');
+
+  let rootDocument = files.find(file => file.relativePath === '/SKILL.md');
+  if (!rootDocument) throw new Error('Imported skill does not contain SKILL.md');
+
+  let metadata = parseImportedSkillMetadata({
+    content: rootDocument.content.toString('utf8'),
+    rootPath: d.rootPath,
+    repositoryName: d.repositoryName
+  });
+  let skill = await skillService.createSkill({
+    project: d.project,
+    instance: d.instance,
+    auditScope: d.auditScope,
+    input: {
+      id: d.skillId,
+      authorization,
+      name: metadata.name,
+      description: metadata.description,
+      clientName: metadata.name,
+      clientDescription: metadata.description,
+      metadata: metadata.metadata,
+      clientMetadata: metadata.metadata,
+      license: metadata.license,
+      compatibility: metadata.compatibility
+    }
+  });
+  await d.onSkillCreated?.(skill);
+  let genericPurpose = await filePurposeService.ensureGenericFilePurpose();
+  let importedPaths = new Set<string>();
+
+  for (let file of files) {
+    await d.onProgress?.();
+
+    let storePath = getImportedStorePath(file.relativePath, skill.store!.pathMode);
+    if (!storePath || importedPaths.has(storePath)) continue;
+    importedPaths.add(storePath);
+
+    if (isSkillDocumentPath(storePath)) {
+      let content = file.content.toString('utf8');
+      await documentService.createDocument({
+        project: d.project,
+        instance: d.instance,
+        auditScope: d.auditScope,
+        input: {
+          title: getSkillDocumentTitle({
+            path: storePath,
+            content,
+            skillName: metadata.name
+          }),
+          content,
+          authorization,
+          store: {
+            id: skill.store!.id,
+            path: storePath
+          }
+        }
+      });
+      continue;
+    }
+
+    let importedFile = await fileService.createUploadedFile({
+      project: d.project,
+      instance: d.instance,
+      auditScope: d.auditScope,
+      purpose: genericPurpose.id,
+      file: new Blob([file.content], {
+        type: file.contentType || 'application/octet-stream'
+      }),
+      input: {
+        name: path.basename(storePath),
+        title: path.basename(storePath),
+        mimeType: file.contentType || 'application/octet-stream',
+        authorization
+      }
+    });
+    await storeItemMutationService.attachTargetToStore({
+      project: d.project,
+      instance: d.instance,
+      store: skill.store!,
+      path: storePath,
+      target: {
+        file: importedFile,
+        document: null
+      }
+    });
+  }
+
+  return skill;
+};

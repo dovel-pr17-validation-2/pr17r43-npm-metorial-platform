@@ -1,0 +1,58 @@
+enum SsoConnectionProviderType {
+  saml
+  oidc
+}
+
+enum SsoConnectionStatus {
+  active
+  disabled
+}
+
+model SsoConnection {
+  oid BigInt @id
+  id  String @unique
+
+  tenantOid BigInt
+  tenant    SsoTenant @relation(fields: [tenantOid], references: [oid], onDelete: Cascade)
+
+  status SsoConnectionStatus @default(active)
+
+  internalId           String?
+  internalClientId     String?
+  internalClientSecret String?
+
+  sourceId String?
+
+  importedDelegationOid BigInt?
+  importedDelegation    SsoImportedDelegation? @relation(fields: [importedDelegationOid], references: [oid], onDelete: Cascade)
+
+  providerType SsoConnectionProviderType
+  providerName String?
+
+  name String
+
+  /// [JsonObject]
+  metadata Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  connectionSetups             SsoConnectionSetup[]
+  userProfiles                 SsoUserProfile[]
+  auths                        SsoAuth[]
+  tests                        SsoTest[]
+  directories                  SsoDirectory[]
+  groups                       SsoConnectionGroup[]
+  roles                        SsoConnectionRole[]
+  allowedAccountDomains        AccountDomainSsoConnection[]
+  delegationAuthorizationCodes SsoDelegationAuthorizationCode[]
+  delegationTokens             SsoDelegationToken[]
+
+  @@unique([importedDelegationOid, sourceId])
+  @@index([importedDelegationOid, status])
+}
+
+enum SsoDirectoryStatus {
+  active
+  disabled
+}

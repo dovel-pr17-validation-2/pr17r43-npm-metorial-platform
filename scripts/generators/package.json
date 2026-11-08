@@ -1,0 +1,34 @@
+{
+  "name": "generator",
+  "module": "index.ts",
+  "type": "module",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "start": "bun ./src/index.ts",
+    "generate:client": "bun run generate:client:typescript && bun run generate:client:python && bun run generate:client:dashboard && bun run generate:client:consumer && bun run generate:client:go",
+    "generate:client:typescript": "bun start --snapshot=${INTROSPECTION_SNAPSHOT:-../../clients/.introspection/snapshot.json} ../../clients/metorial-node/sdk/gen typescript && cd ../../clients/metorial-node/sdk/gen && bun run build",
+    "generate:client:dashboard": "bun start --snapshot=${INTROSPECTION_SNAPSHOT:-../../clients/.introspection/snapshot.json} ../../clients/metorial-dashboard/src/gen typescript && cd ../../clients/metorial-dashboard && bun run build",
+    "generate:client:consumer": "bun start --snapshot=${INTROSPECTION_SNAPSHOT:-../../clients/.introspection/snapshot.json} ../../clients/metorial-consumer/src/gen typescript && cd ../../clients/metorial-consumer && bun run build",
+    "generate:client:python": "bun start --snapshot=${INTROSPECTION_SNAPSHOT:-../../clients/.introspection/snapshot.json} ../../clients/metorial-python/src/metorial/_generated python",
+    "generate:client:python_": "bun start --snapshot=${INTROSPECTION_SNAPSHOT:-../../clients/.introspection/snapshot.json} ../../clients/metorial-python/packages/metorial-generated python",
+    "generate:client:go": "bun start --snapshot=${INTROSPECTION_SNAPSHOT:-../../clients/.introspection/snapshot.json} ../../clients/metorial-go/v1 go",
+    "test": "bun test src/languages/typescript/*.test.ts",
+    "benchmark:mappers": "bun src/languages/typescript/benchmark.ts",
+    "benchmark:mapper-patterns": "bun src/languages/typescript/patterns.benchmark.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "esbuild": "^0.28.2"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@inquirer/prompts": "^8.7.5",
+    "@types/fs-extra": "^11.0.4",
+    "dedent": "^1.7.2",
+    "fs-extra": "^11.4.1",
+    "prettier": "^3.9.10"
+  }
+}

@@ -1,0 +1,304 @@
+import { AnimatePresence, motion } from 'framer-motion';
+import React, { useEffect, useRef, useState } from 'react';
+import { Check, ChevronDown } from 'react-feather';
+import { styled } from 'styled-components';
+import _useDelayed from 'use-delayed';
+import { Menu, MenuProps } from '../menu';
+import { Skeleton } from '../skeleton';
+import { Spinner } from '../spinner';
+import { ButtonStyleProps, buttonTheme, getButtonStyles } from './constants';
+
+export * from './constants';
+export * from './linkButton';
+
+let useDelayed = _useDelayed;
+
+// @ts-ignore
+if (useDelayed.default) useDelayed = useDelayed.default;
+
+let Wrapper = styled('button')`
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  position: relative;
+  cursor: pointer;
+  color: ${buttonTheme.passive_color} !important;
+  background: ${buttonTheme.passive_background};
+  border: solid 1px ${buttonTheme.passive_border};
+  box-shadow: ${buttonTheme.passive_shadow};
+  transform: ${buttonTheme.passive_transform};
+  transition:
+    color 0.2s,
+    background 0.2s,
+    border-color 0.2s,
+    box-shadow 0.2s,
+    transform 0.12s ease;
+  user-select: none;
+
+  &:not(:disabled):hover,
+  &:not(:disabled):focus {
+    color: ${buttonTheme.active_color} !important;
+    background: ${buttonTheme.active_background};
+    border: solid 1px ${buttonTheme.active_border};
+    box-shadow: ${buttonTheme.active_shadow};
+    transform: ${buttonTheme.active_transform};
+  }
+
+  &:not(:disabled):active {
+    box-shadow: ${buttonTheme.pressed_shadow};
+    transform: ${buttonTheme.pressed_transform};
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.7;
+  }
+`;
+
+let SplitButton = styled('div')`
+  display: inline-flex;
+  gap: 1px;
+  align-items: stretch;
+`;
+
+let Overlay = styled(motion.div)`
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: inherit;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+`;
+
+let OverlayInner = styled(motion.div)`
+  display: flex;
+  align-items: center;
+  justify-content: center;
+`;
+
+let Inner = styled('div')`
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-grow: 1;
+  flex-shrink: 0;
+  gap: 6px;
+`;
+
+let Icon = styled('span')`
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+
+  svg {
+    height: 16px;
+    width: 16px;
+  }
+`;
+
+let Content = styled('span')`
+  display: inline-block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 500;
+`;
+
+export let Button = React.forwardRef(
+  (
+    {
+      children,
+      iconLeft,
+      iconRight,
+      loading,
+      success,
+      skeleton,
+      fullWidth,
+      variant,
+      color,
+      size,
+      shadow,
+      onHover,
+      menu,
+      as = 'button',
+      ...props
+    }: {
+      children?: React.ReactNode;
+      iconLeft?: React.ReactNode;
+      iconRight?: React.ReactNode;
+      loading?: boolean;
+      success?: boolean;
+      skeleton?: boolean;
+      fullWidth?: boolean;
+      onHover?: () => void;
+      menu?: MenuProps['items'];
+      as?: 'button' | 'span' | 'div';
+    } & ButtonStyleProps &
+      React.ButtonHTMLAttributes<HTMLButtonElement>,
+    ref
+  ) => {
+    let [isHovered, setIsHovered] = useState(false);
+    useEffect(() => onHover?.(), [isHovered]);
+    let isMouseOverRef = useRef(false);
+
+    let style = getButtonStyles({
+      color,
+      variant,
+      size,
+      shadow
+    });
+
+    let loadingVisible = useDelayed(loading, 200, [false]);
+    let successVisible = useDelayed(success, 200, [false]);
+    let contentVisible = useDelayed(!loading && !success, 200);
+    let hasMenu = Boolean(menu?.length);
+    let buttonStyle = {
+      ...style,
+      ...props.style,
+
+      width: fullWidth && !hasMenu ? '100%' : undefined,
+
+      ...(!children && {
+        width: props.style?.width ?? style.height,
+        padding: 0
+      }),
+
+      ...(hasMenu && {
+        borderTopRightRadius: 0,
+        borderBottomRightRadius: 0,
+        flexGrow: fullWidth ? 1 : undefined
+      })
+    };
+
+    let button = (
+      <Wrapper
+        as={as}
+        ref={ref as any}
+        {...props}
+        style={buttonStyle}
+        disabled={props.disabled || loading || skeleton}
+        onClick={(e: any) => {
+          if (loading || success) e.preventDefault();
+          else props.onClick?.(e);
+        }}
+        onMouseEnter={() => {
+          isMouseOverRef.current = true;
+
+          setTimeout(() => {
+            if (isMouseOverRef.current) setIsHovered(true);
+          }, 100);
+        }}
+        onMouseLeave={() => {
+          isMouseOverRef.current = false;
+          setIsHovered(false);
+        }}
+      >
+        <AnimatePresence>
+          {loadingVisible && !successVisible && (
+            <Overlay
+              key="loading"
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.9 }}
+              style={{
+                backgroundColor: variant == 'outline' ? undefined : 'rgba(0, 0, 0, 0.1)'
+              }}
+              transition={{
+                duration: 0.2,
+                ease: 'easeInOut'
+              }}
+            >
+              <OverlayInner>
+                <Spinner
+                  size={16}
+                  foreground={buttonTheme.spinner_foreground}
+                  background={buttonTheme.spinner_background}
+                />
+              </OverlayInner>
+            </Overlay>
+          )}
+
+          {successVisible && (
+            <Overlay
+              key="success"
+              initial={{ opacity: 0, scale: 0.7 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.7 }}
+              style={{
+                backgroundColor: variant == 'outline' ? undefined : 'rgba(0, 0, 0, 0.1)'
+              }}
+              transition={{
+                duration: 0.3,
+                ease: 'easeInOut'
+              }}
+            >
+              <OverlayInner
+                initial={{ scale: 0.5, rotate: -15 }}
+                animate={{ scale: 1, rotate: -10 }}
+                transition={{ delay: 0.1 }}
+              >
+                <Icon>
+                  <Check size={16} strokeWidth={3} />
+                </Icon>
+              </OverlayInner>
+            </Overlay>
+          )}
+        </AnimatePresence>
+
+        <Inner
+          style={{
+            opacity: contentVisible ? 1 : 0,
+            transition: 'opacity 0.25s ease',
+
+            textAlign: fullWidth || !children ? 'center' : 'left',
+            justifyContent: fullWidth || !children ? 'center' : 'flex-start'
+          }}
+          aria-hidden={loading || success}
+        >
+          {iconLeft && <Icon>{iconLeft}</Icon>}
+          {children && <Content>{children}</Content>}
+          {iconRight && <Icon>{iconRight}</Icon>}
+        </Inner>
+      </Wrapper>
+    );
+
+    if (!hasMenu) {
+      if (skeleton === undefined) return button;
+      return <Skeleton active={skeleton}>{button}</Skeleton>;
+    }
+
+    let splitButton = (
+      <SplitButton style={{ width: fullWidth ? '100%' : undefined }}>
+        {button}
+        <Menu items={menu!} label="More actions">
+          <Wrapper
+            type="button"
+            aria-label="More actions"
+            disabled={props.disabled || loading || success || skeleton}
+            style={{
+              ...style,
+              width: style.height,
+              padding: 0,
+              borderTopLeftRadius: 0,
+              borderBottomLeftRadius: 0,
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center'
+            }}
+          >
+            <Icon>
+              <ChevronDown />
+            </Icon>
+          </Wrapper>
+        </Menu>
+      </SplitButton>
+    );
+
+    if (skeleton === undefined) return splitButton;
+    return <Skeleton active={skeleton}>{splitButton}</Skeleton>;
+  }
+);

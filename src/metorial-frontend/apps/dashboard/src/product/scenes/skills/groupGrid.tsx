@@ -1,0 +1,151 @@
+import type { DashboardInstanceSkillsGroupsListQuery } from '@metorial/dashboard-sdk';
+import { renderWithPagination } from '@metorial/data-hooks';
+import { Paths } from '@metorial/frontend-config';
+import {
+  useCurrentInstance,
+  useCurrentOrganization,
+  useCurrentProject,
+  useSkillGroups
+} from '@metorial/state';
+import { Avatar, Text, theme } from '@metorial/ui';
+import { ItemGrid } from '@metorial/ui-product';
+import { useNavigate } from 'react-router-dom';
+import { styled } from 'styled-components';
+import { EmptyState } from '@metorial/empty-state';
+import { showSkillGroupFormModal } from './groupModal';
+
+
+let Description = styled.span`
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+`;
+
+export let SkillGroupGridCard = (p: {
+  skillGroup: {
+    id: string;
+    name: string;
+    description?: string | null;
+    skills?: unknown[];
+  };
+  href?: string;
+  onClick?: () => void;
+}) => (
+  <ItemGrid.Item
+    entity={{ id: p.skillGroup.id, hasUsage: true }}
+    title={p.skillGroup.name}
+    description={
+      <Description>{p.skillGroup.description || 'No description provided yet.'}</Description>
+    }
+    variant="v2"
+    height={200}
+    href={p.href}
+    onClick={p.onClick}
+    icon={
+      <Avatar
+        entity={{
+          name: p.skillGroup.name,
+          imageUrl: `https://avatar-cdn.metorial.com/${p.skillGroup.id}`
+        }}
+        size={30}
+      />
+    }
+    bottom={
+      <Text size="1">{p.skillGroup.id}</Text>
+    }
+  />
+);
+
+export let SkillGroupsGrid = (
+  p: { instanceId: string } & Omit<
+    DashboardInstanceSkillsGroupsListQuery,
+    'after' | 'before' | 'cursor' | 'limit'
+  >
+) => {
+  let { instanceId, ...query } = p;
+  let organization = useCurrentOrganization();
+  let project = useCurrentProject();
+  let instance = useCurrentInstance();
+  let navigate = useNavigate();
+  let skillGroups = useSkillGroups(instanceId, {
+    order: 'desc',
+    status: ['active'],
+    limit: 21,
+    ...query
+  });
+  let hasActiveFilters = !!(
+    query.search ||
+    query.skillId ||
+    query.createdAt ||
+    query.updatedAt ||
+    (Array.isArray(query.status) ? query.status.length > 0 : query.status)
+  );
+
+  let showCreateModal = () => {
+    if (!instance.data) return;
+
+    showSkillGroupFormModal({
+      instanceId: instance.data.id,
+      onCreate: skillGroup => {
+        navigate(
+          Paths.instance.skillGroup(
+            organization.data,
+            project.data,
+            instance.data,
+            skillGroup.id
+          )
+        );
+      }
+    });
+  };
+
+  return renderWithPagination(skillGroups, {
+    emptyState: (
+      <>
+        {query.search && (
+          <Text size="2" color="gray600">
+            No groups found.
+          </Text>
+        )}
+
+        {!hasActiveFilters && (
+          <EmptyState
+            extra="Skill Groups"
+            title="Create your first group"
+            description="Groups let you organize related skills and manage them as a set."
+            action={{
+              label: 'Create Group',
+              onClick: showCreateModal
+            }}
+          />
+        )}
+
+        {!query.search && hasActiveFilters && (
+          <Text size="2" color="gray600">
+            No groups match the current filters.
+          </Text>
+        )}
+      </>
+    )
+  })(skillGroups => (
+    <>
+      {skillGroups.data.items.length > 0 && (
+        <ItemGrid.Root width="300px">
+          {skillGroups.data.items.map(skillGroup => (
+            <SkillGroupGridCard
+              key={skillGroup.id}
+              skillGroup={skillGroup}
+              href={Paths.instance.skillGroup(
+                organization.data,
+                project.data,
+                instance.data,
+                skillGroup.id
+              )}
+            />
+          ))}
+        </ItemGrid.Root>
+      )}
+    </>
+  ));
+};

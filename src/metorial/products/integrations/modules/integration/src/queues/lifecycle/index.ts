@@ -1,0 +1,104 @@
+import { combineQueueProcessors } from '@lowerdeck/queue';
+import { archiveIntegrationInstanceQueueProcessor } from './archiveIntegrationInstance';
+import {
+  integrationArchiveInstancesManyQueueProcessor,
+  integrationArchiveProvidersManyQueueProcessor,
+  integrationArchivedQueueProcessor,
+  integrationCreatedQueueProcessor,
+  integrationDeletedQueueProcessor,
+  integrationUpdatedQueueProcessor
+} from './integration';
+import {
+  integrationInstanceArchiveGroupSourcesManyQueueProcessor,
+  integrationInstanceArchivedQueueProcessor,
+  integrationInstanceCreatedQueueProcessor,
+  integrationInstanceDeletedQueueProcessor,
+  integrationInstanceUpdatedQueueProcessor
+} from './integrationInstance';
+import {
+  integrationInstanceGroupArchiveProvidersManyQueueProcessor,
+  integrationInstanceGroupArchivedQueueProcessor,
+  integrationInstanceGroupCreatedQueueProcessor,
+  integrationInstanceGroupUpdatedQueueProcessor
+} from './integrationInstanceGroup';
+import { integrationInstanceGroupProviderSetQueueProcessor } from './integrationInstanceGroupProvider';
+import {
+  integrationInstanceProviderSetQueueProcessor,
+  integrationInstanceProviderSyncGroupProvidersManyQueueProcessor
+} from './integrationInstanceProvider';
+import {
+  integrationProviderArchiveGroupProvidersManyQueueProcessor,
+  integrationProviderArchiveInstanceProvidersManyQueueProcessor,
+  integrationProviderArchivedQueueProcessor,
+  integrationProviderCreatedQueueProcessor,
+  integrationProviderUpdatedQueueProcessor,
+  integrationProviderUpdatedSyncIntegrationInstanceGroupSessionsQueueProcessor,
+  integrationProviderUpdatedSyncIntegrationInstanceSessionsQueueProcessor
+} from './integrationProvider';
+import { integrationProviderStaleCredentialsProcessors } from './integrationProviderStaleCredentials';
+import { magicMcpBackingReconcileQueueProcessor } from './magicMcpBackingSync';
+
+export let lifecycleQueues = combineQueueProcessors([
+  archiveIntegrationInstanceQueueProcessor,
+  integrationCreatedQueueProcessor,
+  integrationUpdatedQueueProcessor,
+  integrationArchivedQueueProcessor,
+  integrationArchiveInstancesManyQueueProcessor,
+  integrationArchiveProvidersManyQueueProcessor,
+  integrationDeletedQueueProcessor,
+  integrationInstanceGroupCreatedQueueProcessor,
+  integrationInstanceGroupUpdatedQueueProcessor,
+  integrationInstanceGroupArchivedQueueProcessor,
+  integrationInstanceGroupArchiveProvidersManyQueueProcessor,
+  integrationInstanceGroupProviderSetQueueProcessor,
+  integrationInstanceCreatedQueueProcessor,
+  integrationInstanceUpdatedQueueProcessor,
+  integrationInstanceArchivedQueueProcessor,
+  integrationInstanceArchiveGroupSourcesManyQueueProcessor,
+  integrationInstanceDeletedQueueProcessor,
+  integrationInstanceProviderSetQueueProcessor,
+  integrationInstanceProviderSyncGroupProvidersManyQueueProcessor,
+  integrationProviderCreatedQueueProcessor,
+  integrationProviderUpdatedQueueProcessor,
+  integrationProviderArchivedQueueProcessor,
+  integrationProviderArchiveInstanceProvidersManyQueueProcessor,
+  integrationProviderArchiveGroupProvidersManyQueueProcessor,
+  integrationProviderStaleCredentialsProcessors,
+  magicMcpBackingReconcileQueueProcessor,
+  integrationProviderUpdatedSyncIntegrationInstanceSessionsQueueProcessor,
+  integrationProviderUpdatedSyncIntegrationInstanceGroupSessionsQueueProcessor
+]);
+
+export let lifecycleSubspaceQueues = combineQueueProcessors([
+  integrationCreatedQueueProcessor,
+  integrationUpdatedQueueProcessor,
+  integrationInstanceGroupCreatedQueueProcessor,
+  integrationInstanceGroupUpdatedQueueProcessor,
+  integrationInstanceGroupProviderSetQueueProcessor,
+  integrationInstanceCreatedQueueProcessor,
+  integrationInstanceUpdatedQueueProcessor,
+  integrationInstanceProviderSetQueueProcessor,
+  integrationInstanceProviderSyncGroupProvidersManyQueueProcessor,
+  integrationProviderCreatedQueueProcessor,
+  integrationProviderUpdatedQueueProcessor,
+  magicMcpBackingReconcileQueueProcessor,
+  integrationProviderUpdatedSyncIntegrationInstanceSessionsQueueProcessor,
+  integrationProviderUpdatedSyncIntegrationInstanceGroupSessionsQueueProcessor
+]);
+
+export let lifecycleFederationQueues = combineQueueProcessors([
+  archiveIntegrationInstanceQueueProcessor,
+  integrationArchivedQueueProcessor,
+  integrationArchiveInstancesManyQueueProcessor,
+  integrationArchiveProvidersManyQueueProcessor,
+  integrationDeletedQueueProcessor,
+  integrationInstanceGroupArchivedQueueProcessor,
+  integrationInstanceGroupArchiveProvidersManyQueueProcessor,
+  integrationInstanceArchivedQueueProcessor,
+  integrationInstanceArchiveGroupSourcesManyQueueProcessor,
+  integrationInstanceDeletedQueueProcessor,
+  integrationProviderArchivedQueueProcessor,
+  integrationProviderArchiveInstanceProvidersManyQueueProcessor,
+  integrationProviderArchiveGroupProvidersManyQueueProcessor,
+  integrationProviderStaleCredentialsProcessors
+]);

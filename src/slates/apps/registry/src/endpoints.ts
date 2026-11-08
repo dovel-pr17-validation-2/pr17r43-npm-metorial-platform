@@ -1,0 +1,38 @@
+import { RedisClient } from 'bun';
+import { slatesRegistryApi } from './apis/internal';
+import { registryApp } from './apis/public';
+import { db } from './db';
+import { env } from './env';
+
+Bun.serve({
+  fetch: registryApp.fetch,
+  port: env.ports.SLATES_REGISTRY_PUBLIC_PORT ?? 52040
+});
+
+Bun.serve({
+  fetch: slatesRegistryApi,
+  port: env.ports.SLATES_REGISTRY_INTERNAL_PORT ?? 52041
+});
+
+console.log('Slates registry server is running');
+
+let redis = new RedisClient(process.env.REDIS_URL?.replace('rediss://', 'redis://'), {
+  tls: process.env.REDIS_URL?.startsWith('rediss://')
+});
+
+if (process.env.NODE_ENV === 'production') {
+  Bun.serve({
+    fetch: async _ => {
+      try {
+        await db.tenant.count();
+
+        await redis.ping();
+
+        return new Response('OK');
+      } catch (e) {
+        return new Response('Service Unavailable', { status: 503 });
+      }
+    },
+    port: 12121
+  });
+}

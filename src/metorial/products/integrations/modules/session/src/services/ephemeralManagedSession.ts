@@ -1,0 +1,705 @@
+import { badRequestError, notFoundError, ServiceError } from '@lowerdeck/error';
+import { createLock } from '@lowerdeck/lock';
+import { Service } from '@lowerdeck/service';
+import {
+  addAfterTransactionHook,
+  db,
+  type Environment,
+  type EphemeralManagedSession,
+  getId,
+  type Session,
+  type SessionTemplate,
+  type Solution,
+  type Tenant,
+  withTransaction
+} from '@metorial-subspace/db';
+import { checkDeletedEdit, isRecordDeleted } from '@metorial-subspace/list-utils';
+import {
+  getMetorialSolution,
+  type MetorialFacing,
+  resolveMetorialFacing
+} from '@metorial-subspace/module-tenant';
+import { Fabric } from '@metorial/fabric';
+import { rateLimitService } from '@metorial/module-rate-limit';
+import { env } from '../env';
+import { recordEphemeralSessionAuditEvent } from '../lib/ephemeralSessionAudit';
+import { sessionArchivedQueue } from '../queues/lifecycle/session';
+import { createSessionRecord, resolveSessionRecordProviders } from './_shared/createSession';
+import {
+  assertInternalAdapterSupportedBySession,
+  type InternalAdapterInput,
+  resolveInternalAdapter
+} from './_shared/internalAdapter';
+import { type SessionProviderTemplateInput } from './sessionProviderInput';
+
+let ephemeralManagedSessionResolveLock = createLock({
+  name: 'sub/ses/epms/resolve/lock',
+  redisUrl: env.service.REDIS_URL
+});
+
+let EPHEMERAL_MANAGED_SESSION_RECONCILE_POLL_INTERVAL_MS = 100;
+let EPHEMERAL_MANAGED_SESSION_RECONCILE_POLL_ATTEMPTS = 20;
+
+let wait = async (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+type ResolvedBackingSession = Session & {
+  tenant: Tenant;
+  solution: Solution;
+};
+
+let include = {
+  tenant: true,
+  solution: true,
+  environment: true,
+  identity: true,
+  sessionTemplate: {
+    include: {
+      providers: {
+        where: { status: 'active' as const },
+        include: {
+          deployment: true,
+          config: true,
+          authConfig: true
+        }
+      }
+    }
+  },
+  currentSession: {
+    include: {
+      tenant: true,
+      solution: true
+    }
+  }
+};
+
+let stateSelect = {
+  oid: true,
+  id: true,
+  isReconciling: true,
+  markSessionsAsInternal: true,
+  adapterGlobalOid: true,
+  templateHash: true,
+  willRotateAt: true,
+  maxSessionDurationInMinutes: true,
+  sessionTemplate: { select: { hash: true, status: true } },
+  currentSession: {
+    include: {
+      tenant: true,
+      solution: true
+    }
+  }
+};
+
+type EphemeralManagedSessionScope = {
+  sessionId: string;
+  tenantId: string;
+  solutionId: string;
+  tenantOid?: bigint;
+  solutionOid?: number;
+};
+
+let getEphemeralManagedSessionStateById = (d: EphemeralManagedSessionScope) =>
+  db.ephemeralManagedSession.findFirst({
+    where: {
+      id: d.sessionId,
+      status: 'active',
+      tenant:
+        d.tenantOid !== undefined
+          ? { oid: d.tenantOid }
+          : { OR: [{ id: d.tenantId }, { identifier: d.tenantId }] },
+      solution:
+        d.solutionOid !== undefined
+          ? { oid: d.solutionOid }
+          : { OR: [{ id: d.solutionId }, { identifier: d.solutionId }] }
+    },
+    select: stateSelect
+  });
+
+let getEphemeralManagedSessionForRotation = (d: { oid: bigint }) =>
+  db.ephemeralManagedSession.findFirst({
+    where: { oid: d.oid, status: 'active' },
+    include
+  });
+
+type EphemeralManagedSessionRecord = NonNullable<
+  Awaited<ReturnType<typeof getEphemeralManagedSessionForRotation>>
+>;
+
+type EphemeralManagedSessionState = NonNullable<
+  Awaited<ReturnType<typeof getEphemeralManagedSessionStateById>>
+>;
+
+let shouldRotateBackingSession = (ephemeralManagedSession: EphemeralManagedSessionState) => {
+  let currentSession = ephemeralManagedSession.currentSession;
+  if (!currentSession) return true;
+  if (currentSession.status !== 'active') return true;
+  if (!currentSession.isEphemeral) return true;
+  if (currentSession.ephemeralManagedSessionOid !== ephemeralManagedSession.oid) return true;
+  if (currentSession.isInternal !== ephemeralManagedSession.markSessionsAsInternal)
+    return true;
+  if (
+    (currentSession.adapterGlobalOid ?? null) !==
+    (ephemeralManagedSession.adapterGlobalOid ?? null)
+  ) {
+    return true;
+  }
+  if (
+    (ephemeralManagedSession.templateHash ?? null) !==
+    (ephemeralManagedSession.sessionTemplate.hash ?? null)
+  ) {
+    return true;
+  }
+
+  if (ephemeralManagedSession.willRotateAt) {
+    return ephemeralManagedSession.willRotateAt.getTime() <= Date.now();
+  }
+
+  let maxDurationInMinutes = ephemeralManagedSession.maxSessionDurationInMinutes;
+  if (maxDurationInMinutes <= 0) return false;
+
+  return Date.now() - currentSession.createdAt.getTime() >= maxDurationInMinutes * 60 * 1000;
+};
+
+let waitForEphemeralManagedSessionReconcile = async (d: EphemeralManagedSessionScope) => {
+  let latest: EphemeralManagedSessionState | null = null;
+
+  for (
+    let attempt = 0;
+    attempt < EPHEMERAL_MANAGED_SESSION_RECONCILE_POLL_ATTEMPTS;
+    attempt++
+  ) {
+    latest = await getEphemeralManagedSessionStateById(d);
+    if (!latest || !latest.isReconciling) return latest;
+
+    await wait(EPHEMERAL_MANAGED_SESSION_RECONCILE_POLL_INTERVAL_MS);
+  }
+
+  return latest;
+};
+
+let getWillRotateAt = (d: { session: Session; maxSessionDurationInMinutes: number }) => {
+  if (d.maxSessionDurationInMinutes <= 0) return null;
+  return new Date(d.session.createdAt.getTime() + d.maxSessionDurationInMinutes * 60 * 1000);
+};
+
+export type GetEphemeralManagedSessionByIdParams = {
+  ephemeralManagedSessionId: string;
+  allowDeleted?: boolean;
+};
+
+export type CreateEphemeralManagedSessionParams = {
+  sessionTemplate: SessionProviderTemplateInput;
+  input: {
+    maxSessionDurationInMinutes: number;
+    markSessionsAsInternal?: boolean;
+    adapter?: InternalAdapterInput;
+  };
+};
+
+export type UpsertPlaceholderEphemeralManagedSessionParams = {
+  ephemeralManagedSession?: EphemeralManagedSession | null;
+  sessionTemplate: SessionTemplate;
+  input: {
+    maxSessionDurationInMinutes: number;
+    actorOid?: bigint | null;
+    owner?: {
+      ownerActorOid: bigint | null;
+      isOwnerLocked: boolean;
+      isOwnerOnlyVisible?: boolean;
+    };
+    isReconciling?: boolean;
+    markSessionsAsInternal?: boolean;
+    adapter?: InternalAdapterInput;
+  };
+};
+
+export type ArchiveEphemeralManagedSessionParams = {
+  ephemeralManagedSession: EphemeralManagedSessionRecord;
+};
+
+class ephemeralManagedSessionServiceImpl {
+  async getEphemeralManagedSessionById(
+    d: MetorialFacing<GetEphemeralManagedSessionByIdParams>
+  ) {
+    let { instance, organizationActor, ...rest } = d;
+    let scope = await resolveMetorialFacing(d);
+
+    return this.getEphemeralManagedSessionByIdInternal({
+      ...rest,
+      tenant: scope.tenant,
+      environment: scope.environment
+    });
+  }
+
+  async getEphemeralManagedSessionByIdInternal(
+    d: { tenant: Tenant; environment: Environment } & GetEphemeralManagedSessionByIdParams
+  ) {
+    let solution = await getMetorialSolution();
+
+    let ephemeralManagedSession = await db.ephemeralManagedSession.findFirst({
+      where: {
+        id: d.ephemeralManagedSessionId,
+        tenantOid: d.tenant.oid,
+        solutionOid: solution.oid,
+        environmentOid: d.environment.oid
+      },
+      include
+    });
+    if (!ephemeralManagedSession) {
+      throw new ServiceError(
+        notFoundError('ephemeral_managed_session', d.ephemeralManagedSessionId)
+      );
+    }
+
+    return ephemeralManagedSession;
+  }
+
+  async createEphemeralManagedSession(d: MetorialFacing<CreateEphemeralManagedSessionParams>) {
+    let { instance, organizationActor, ...rest } = d;
+    let scope = await resolveMetorialFacing(d);
+
+    return this.createEphemeralManagedSessionInternal({
+      ...rest,
+      tenant: scope.tenant,
+      environment: scope.environment
+    });
+  }
+
+  async createEphemeralManagedSessionInternal(
+    d: { tenant: Tenant; environment: Environment } & CreateEphemeralManagedSessionParams
+  ) {
+    let solution = await getMetorialSolution();
+    let instanceOid = d.environment.instanceOid;
+    if (instanceOid == null) throw new Error('Ephemeral managed sessions require an instance');
+
+    let markSessionsAsInternal = d.input.markSessionsAsInternal ?? false;
+    if (markSessionsAsInternal !== !!d.input.adapter) {
+      throw new ServiceError(
+        badRequestError({
+          code: 'invalid_internal_ephemeral_session_adapter',
+          message: 'Internal ephemeral managed sessions require exactly one adapter.'
+        })
+      );
+    }
+
+    let adapter = d.input.adapter
+      ? await resolveInternalAdapter({
+          tenant: d.tenant,
+          environment: d.environment,
+          adapter: d.input.adapter
+        })
+      : null;
+
+    await Fabric.fire('provider.session.ephemeral_created:before', {
+      instanceOid
+    });
+    await rateLimitService.consume({
+      instance: { oid: instanceOid },
+      usages: [{ key: 'sessions.created' }]
+    });
+
+    let input = {
+      name: d.sessionTemplate.name ?? undefined,
+      description: d.sessionTemplate.description ?? undefined,
+      metadata: (d.sessionTemplate.metadata as Record<string, any> | null) ?? undefined,
+      privateMetadata:
+        (d.sessionTemplate.privateMetadata as Record<string, any> | null) ?? undefined,
+      providers: [
+        {
+          sessionTemplateId: d.sessionTemplate.id,
+          __sessionTemplate: d.sessionTemplate
+        }
+      ]
+    };
+
+    let resolvedProviders = await resolveSessionRecordProviders({
+      tenant: d.tenant,
+      environment: d.environment,
+      providers: input.providers
+    });
+
+    return withTransaction(async db => {
+      let ephemeralManagedSession = await db.ephemeralManagedSession.create({
+        data: {
+          ...getId('ephemeralManagedSession'),
+          status: 'active',
+          tenantOid: d.tenant.oid,
+          projectOid: d.tenant.projectOid,
+          solutionOid: solution.oid,
+          environmentOid: d.environment.oid,
+          instanceOid: d.environment.instanceOid,
+          sessionTemplateOid: d.sessionTemplate.oid,
+          actorOid: d.sessionTemplate.identityActorOid ?? null,
+          identityOid: d.sessionTemplate.identityOid ?? null,
+          ownerActorOid: d.sessionTemplate.ownerActorOid ?? null,
+          isOwnerLocked: d.sessionTemplate.isOwnerLocked ?? false,
+          isOwnerOnlyVisible: d.sessionTemplate.isOwnerOnlyVisible ?? false,
+          maxSessionDurationInMinutes: d.input.maxSessionDurationInMinutes,
+          templateHash: d.sessionTemplate.hash ?? null,
+          markSessionsAsInternal,
+          adapterGlobalOid: adapter?.oid ?? null
+        }
+      });
+
+      let session = await createSessionRecord({
+        tenant: d.tenant,
+        environment: d.environment,
+        isEphemeral: true,
+        isInternal: markSessionsAsInternal,
+        adapterGlobalOid: adapter?.oid ?? null,
+        ephemeralManagedSessionOid: ephemeralManagedSession.oid,
+        identityActorOid: d.sessionTemplate.identityActorOid ?? null,
+        identityOid: d.sessionTemplate.identityOid ?? null,
+        owner: {
+          ownerActorOid: ephemeralManagedSession.ownerActorOid,
+          isOwnerLocked: ephemeralManagedSession.isOwnerLocked,
+          isOwnerOnlyVisible: ephemeralManagedSession.isOwnerOnlyVisible
+        },
+        input,
+        resolvedProviders
+      });
+
+      if (adapter) {
+        await assertInternalAdapterSupportedBySession({
+          session,
+          adapterGlobalOid: adapter.oid
+        });
+      }
+
+      let updated = await db.ephemeralManagedSession.update({
+        where: { oid: ephemeralManagedSession.oid },
+        data: {
+          currentSessionOid: session.oid,
+          templateHash: d.sessionTemplate.hash ?? null,
+          willRotateAt: getWillRotateAt({
+            session,
+            maxSessionDurationInMinutes: d.input.maxSessionDurationInMinutes
+          })
+        },
+        include
+      });
+
+      await addAfterTransactionHook(async () =>
+        recordEphemeralSessionAuditEvent({
+          session,
+          instanceOid: d.environment.instanceOid,
+          projectOid: d.tenant.projectOid
+        })
+      );
+
+      return updated;
+    });
+  }
+
+  async upsertPlaceholderEphemeralManagedSession(
+    d: MetorialFacing<UpsertPlaceholderEphemeralManagedSessionParams>
+  ) {
+    let { instance, organizationActor, ...rest } = d;
+    let scope = await resolveMetorialFacing(d);
+
+    return this.upsertPlaceholderEphemeralManagedSessionInternal({
+      ...rest,
+      tenant: scope.tenant,
+      environment: scope.environment
+    });
+  }
+
+  async upsertPlaceholderEphemeralManagedSessionInternal(
+    d: {
+      tenant: Tenant;
+      environment: Environment;
+    } & UpsertPlaceholderEphemeralManagedSessionParams
+  ) {
+    let solution = await getMetorialSolution();
+
+    return withTransaction(async db => {
+      let markSessionsAsInternal = d.input.markSessionsAsInternal ?? false;
+      if (markSessionsAsInternal !== !!d.input.adapter) {
+        throw new ServiceError(
+          badRequestError({
+            code: 'invalid_internal_ephemeral_session_adapter',
+            message: 'Internal ephemeral managed sessions require exactly one adapter.'
+          })
+        );
+      }
+      let adapter = d.input.adapter
+        ? await resolveInternalAdapter({
+            tenant: d.tenant,
+            environment: d.environment,
+            adapter: d.input.adapter
+          })
+        : null;
+      let data = {
+        status: 'active' as const,
+        archivedAt: null,
+        maxSessionDurationInMinutes: d.input.maxSessionDurationInMinutes,
+        sessionTemplateOid: d.sessionTemplate.oid,
+        actorOid: d.input.actorOid ?? d.sessionTemplate.identityActorOid ?? null,
+        identityOid: d.sessionTemplate.identityOid ?? null,
+        ownerActorOid: d.input.owner
+          ? d.input.owner.ownerActorOid
+          : (d.sessionTemplate.ownerActorOid ?? null),
+        isOwnerLocked: d.input.owner
+          ? d.input.owner.isOwnerLocked
+          : (d.sessionTemplate.isOwnerLocked ?? false),
+        isOwnerOnlyVisible: d.input.owner
+          ? (d.input.owner.isOwnerOnlyVisible ?? false)
+          : (d.sessionTemplate.isOwnerOnlyVisible ?? false),
+        isReconciling: d.input.isReconciling ?? false,
+        markSessionsAsInternal,
+        adapterGlobalOid: adapter?.oid ?? null
+      };
+
+      if (d.ephemeralManagedSession && !isRecordDeleted(d.ephemeralManagedSession)) {
+        return await db.ephemeralManagedSession.update({
+          where: {
+            oid: d.ephemeralManagedSession.oid,
+            tenantOid: d.tenant.oid,
+            solutionOid: solution.oid,
+            environmentOid: d.environment.oid
+          },
+          data,
+          include
+        });
+      }
+
+      return await db.ephemeralManagedSession.create({
+        data: {
+          ...getId('ephemeralManagedSession'),
+          ...data,
+          tenantOid: d.tenant.oid,
+          projectOid: d.tenant.projectOid,
+          solutionOid: solution.oid,
+          environmentOid: d.environment.oid,
+          instanceOid: d.environment.instanceOid
+        },
+        include
+      });
+    });
+  }
+
+  async archiveEphemeralManagedSession(
+    d: MetorialFacing<ArchiveEphemeralManagedSessionParams>
+  ) {
+    let { instance, organizationActor, ...rest } = d;
+    let scope = await resolveMetorialFacing(d);
+
+    return this.archiveEphemeralManagedSessionInternal({
+      ...rest,
+      tenant: scope.tenant,
+      environment: scope.environment
+    });
+  }
+
+  async archiveEphemeralManagedSessionInternal(
+    d: { tenant: Tenant; environment: Environment } & ArchiveEphemeralManagedSessionParams
+  ) {
+    checkDeletedEdit(d.ephemeralManagedSession, 'archive');
+
+    return await ephemeralManagedSessionResolveLock.usingLock(
+      d.ephemeralManagedSession.id,
+      async () => {
+        let ephemeralManagedSession = await this.getEphemeralManagedSessionByIdInternal({
+          ephemeralManagedSessionId: d.ephemeralManagedSession.id,
+          tenant: d.tenant,
+          environment: d.environment
+        });
+
+        checkDeletedEdit(ephemeralManagedSession, 'archive');
+
+        return withTransaction(async db => {
+          let archivedAt = new Date();
+          let sessions = await db.session.findMany({
+            where: {
+              ephemeralManagedSessionOid: ephemeralManagedSession.oid,
+              status: 'active'
+            },
+            select: { oid: true, id: true }
+          });
+
+          if (sessions.length > 0) {
+            await db.sessionProvider.updateMany({
+              where: {
+                sessionOid: { in: sessions.map(session => session.oid) }
+              },
+              data: {
+                status: 'archived'
+              }
+            });
+
+            await db.session.updateMany({
+              where: {
+                oid: { in: sessions.map(session => session.oid) }
+              },
+              data: {
+                status: 'archived',
+                archivedAt,
+                connectionState: 'disconnected'
+              }
+            });
+          }
+
+          let archived = await db.ephemeralManagedSession.update({
+            where: { oid: ephemeralManagedSession.oid },
+            data: {
+              status: 'archived',
+              archivedAt,
+              willRotateAt: null
+            },
+            include
+          });
+
+          if (sessions.length > 0) {
+            await addAfterTransactionHook(async () =>
+              sessionArchivedQueue.addMany(
+                sessions.map(session => ({
+                  sessionId: session.id
+                }))
+              )
+            );
+          }
+
+          return archived;
+        });
+      }
+    );
+  }
+
+  async resolveBackingSessionById(
+    d: EphemeralManagedSessionScope
+  ): Promise<ResolvedBackingSession | null> {
+    let existing = await getEphemeralManagedSessionStateById(d);
+    if (!existing) return null;
+
+    if (existing.isReconciling) {
+      let resolved = await waitForEphemeralManagedSessionReconcile(d);
+      if (!resolved) return null;
+      if (resolved.isReconciling && resolved.currentSession?.status === 'active') {
+        return resolved.currentSession;
+      }
+      existing = resolved;
+    }
+
+    if (!shouldRotateBackingSession(existing)) {
+      return existing.currentSession!;
+    }
+
+    return await ephemeralManagedSessionResolveLock.usingLock(existing.id, async () => {
+      let state = await getEphemeralManagedSessionStateById(d);
+      if (!state) return null;
+
+      if (state.isReconciling) {
+        let resolved = await waitForEphemeralManagedSessionReconcile(d);
+        if (!resolved) return null;
+        if (resolved.isReconciling && resolved.currentSession?.status === 'active') {
+          return resolved.currentSession;
+        }
+        state = resolved;
+      }
+
+      if (!shouldRotateBackingSession(state)) {
+        return state.currentSession!;
+      }
+
+      if (state.sessionTemplate.status !== 'active') {
+        return state.currentSession;
+      }
+
+      let ephemeralManagedSession = await getEphemeralManagedSessionForRotation({
+        oid: state.oid
+      });
+      if (!ephemeralManagedSession) return null;
+
+      let instanceOid = ephemeralManagedSession.environment.instanceOid;
+      if (instanceOid == null) {
+        throw new Error('Ephemeral managed sessions require an instance');
+      }
+
+      await Fabric.fire('provider.session.ephemeral_created:before', {
+        instanceOid
+      });
+
+      let input = {
+        name: ephemeralManagedSession.sessionTemplate.name ?? undefined,
+        description: ephemeralManagedSession.sessionTemplate.description ?? undefined,
+        metadata:
+          (ephemeralManagedSession.sessionTemplate.metadata as any | null) ?? undefined,
+        privateMetadata:
+          (ephemeralManagedSession.sessionTemplate.privateMetadata as any | null) ?? undefined,
+        providers: [
+          {
+            sessionTemplateId: ephemeralManagedSession.sessionTemplate.id,
+            __sessionTemplate: ephemeralManagedSession.sessionTemplate
+          }
+        ]
+      };
+
+      let resolvedProviders = await resolveSessionRecordProviders({
+        tenant: ephemeralManagedSession.tenant,
+        environment: ephemeralManagedSession.environment,
+        providers: input.providers
+      });
+
+      return await withTransaction(async db => {
+        let session = await createSessionRecord({
+          tenant: ephemeralManagedSession.tenant,
+          environment: ephemeralManagedSession.environment,
+          isEphemeral: true,
+          isInternal: ephemeralManagedSession.markSessionsAsInternal,
+          adapterGlobalOid: ephemeralManagedSession.adapterGlobalOid,
+          ephemeralManagedSessionOid: ephemeralManagedSession.oid,
+          identityActorOid:
+            ephemeralManagedSession.sessionTemplate.identityActorOid ??
+            ephemeralManagedSession.actorOid ??
+            null,
+          identityOid: ephemeralManagedSession.sessionTemplate.identityOid ?? null,
+          owner: {
+            ownerActorOid: ephemeralManagedSession.ownerActorOid,
+            isOwnerLocked: ephemeralManagedSession.isOwnerLocked,
+            isOwnerOnlyVisible: ephemeralManagedSession.isOwnerOnlyVisible
+          },
+          input,
+          resolvedProviders
+        });
+
+        if (ephemeralManagedSession.adapterGlobalOid) {
+          await assertInternalAdapterSupportedBySession({
+            session,
+            adapterGlobalOid: ephemeralManagedSession.adapterGlobalOid
+          });
+        }
+
+        await db.ephemeralManagedSession.update({
+          where: { oid: ephemeralManagedSession.oid },
+          data: {
+            currentSessionOid: session.oid,
+            templateHash: ephemeralManagedSession.sessionTemplate.hash ?? null,
+            willRotateAt: getWillRotateAt({
+              session,
+              maxSessionDurationInMinutes: ephemeralManagedSession.maxSessionDurationInMinutes
+            })
+          }
+        });
+
+        await addAfterTransactionHook(async () =>
+          recordEphemeralSessionAuditEvent({
+            session,
+            instanceOid: ephemeralManagedSession.environment.instanceOid,
+            projectOid: ephemeralManagedSession.tenant.projectOid
+          })
+        );
+
+        return {
+          ...session,
+          tenant: ephemeralManagedSession.tenant,
+          solution: ephemeralManagedSession.solution
+        };
+      });
+    });
+  }
+}
+
+export let ephemeralManagedSessionService = Service.create(
+  'ephemeralManagedSessionService',
+  () => new ephemeralManagedSessionServiceImpl()
+).build();

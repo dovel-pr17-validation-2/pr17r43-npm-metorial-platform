@@ -1,0 +1,481 @@
+import { Snowflake } from '@lowerdeck/snowflake';
+import type {
+  ClientCapabilities,
+  JSONRPCMessage,
+  Prompt,
+  ResourceTemplate,
+  ServerCapabilities,
+  Tool
+} from '@modelcontextprotocol/sdk/types.js';
+import { createPrismaPgAdapter } from '@lowerdeck/prisma-pg';
+import { readReplicas } from '@prisma/extension-read-replicas';
+import type { JSONSchema4, JSONSchema6, JSONSchema7 } from 'json-schema';
+import { PrismaClient } from '../../prisma/generated/client.js';
+import type * as ProductAssistant from '../types/product-assistant.js';
+
+export * from '../../prisma/generated/client.js';
+
+let workerIdBits = 12;
+let workerIdMask = (1 << workerIdBits) - 1;
+
+let workerId = (() => {
+  let array = new Uint16Array(1);
+  crypto.getRandomValues(array);
+  return array[0] & workerIdMask;
+})();
+
+let generator = new Snowflake({
+  workerId,
+  datacenterId: 0,
+  workerIdBits: workerIdBits,
+  datacenterIdBits: 0,
+  sequenceBits: 9,
+  epoch: new Date('2025-06-01T00:00:00Z')
+});
+
+let getSecureRandomInt = () => {
+  let array = new Uint32Array(1);
+  crypto.getRandomValues(array);
+  return array[0] & 0x7fffffff;
+};
+
+let pointLookupOperations = new Set([
+  'findUnique',
+  'findUniqueOrThrow',
+  'findFirst',
+  'findFirstOrThrow'
+]);
+let readOperations = new Set([...pointLookupOperations, 'findMany']);
+
+let loadsRelations = (args: any) =>
+  !!args &&
+  (!!args.include ||
+    (!!args.select &&
+      Object.values(args.select).some(value => typeof value === 'object' && value !== null)));
+
+// Point lookups load their relations in one joined query; lists keep one query per relation so
+// a page of rows doesn't multiply into a wide join.
+let withRelationLoadStrategy = (operation: string, args: any) => {
+  if (!readOperations.has(operation) || !loadsRelations(args)) return args;
+  if (args.relationLoadStrategy !== undefined) return args;
+
+  return {
+    ...args,
+    relationLoadStrategy: pointLookupOperations.has(operation) ? 'join' : 'query'
+  };
+};
+
+let createClient = () => {
+  let mainAdapter = createPrismaPgAdapter(
+    {
+      connectionString: process.env.DATABASE_URL
+    },
+    {
+      environment: process.env.METORIAL_ENV,
+      databaseName: 'core',
+      role: 'primary'
+    }
+  );
+
+  let replicaAdapter = process.env.DATABASE_URL_READER
+    ? createPrismaPgAdapter(
+        {
+          connectionString: process.env.DATABASE_URL_READER
+        },
+        {
+          environment: process.env.METORIAL_ENV,
+          databaseName: 'core',
+          role: 'replica'
+        }
+      )
+    : undefined;
+
+  let replicaClient = replicaAdapter
+    ? new PrismaClient({ adapter: replicaAdapter })
+    : undefined;
+
+  let baseClient = new PrismaClient({
+    adapter: mainAdapter,
+    transactionOptions: {
+      maxWait: 10000,
+      timeout: 12000
+    }
+  });
+
+  if (replicaClient) {
+    baseClient = baseClient.$extends(
+      readReplicas({ replicas: [replicaClient] })
+    ) as any as PrismaClient;
+  }
+
+  baseClient = baseClient.$extends({
+    query: {
+      $allModels: {
+        $allOperations: async ({ operation, args, query }) =>
+          await query(withRelationLoadStrategy(operation, args))
+      }
+    }
+  }) as any as PrismaClient;
+
+  return baseClient.$extends({
+    query: {
+      $allModels: {
+        create: async args => {
+          let normalizedModelName = (args.model.charAt(0).toUpperCase() +
+            args.model.slice(1)) as 'user';
+
+          if (baseClient[normalizedModelName].fields.oid?.typeName == 'BigInt') {
+            // @ts-ignore
+            if (typeof args.args.data.oid === 'undefined') {
+              // @ts-ignore
+              args.args.data.oid = generator.nextId();
+            }
+          }
+
+          // @ts-ignore
+          if (baseClient[normalizedModelName].fields.id?.typeName == 'BigInt') {
+            // @ts-ignore
+            if (typeof args.args.data.id === 'undefined') {
+              // @ts-ignore
+              args.args.data.id = generator.nextId();
+            }
+          }
+
+          // @ts-ignore
+          if (baseClient[normalizedModelName].fields.oid?.typeName == 'Int') {
+            // @ts-ignore
+            if (typeof args.args.data.oid === 'undefined') {
+              // @ts-ignore
+              args.args.data.oid = getSecureRandomInt();
+            }
+          }
+
+          // @ts-ignore
+          if (baseClient[normalizedModelName].fields.id?.typeName == 'Int') {
+            // @ts-ignore
+            if (typeof args.args.data.id === 'undefined') {
+              // @ts-ignore
+              args.args.data.id = getSecureRandomInt();
+            }
+          }
+
+          return args.query(args.args);
+        },
+
+        createMany: async args => {
+          let normalizedModelName = (args.model.charAt(0).toUpperCase() +
+            args.model.slice(1)) as 'user';
+
+          if (baseClient[normalizedModelName].fields.oid?.typeName == 'BigInt') {
+            let data = Array.isArray(args.args.data) ? args.args.data : [args.args.data];
+
+            for (let item of data) {
+              // @ts-ignore
+              if (typeof item.oid === 'undefined') {
+                // @ts-ignore
+                item.oid = generator.nextId();
+              }
+            }
+          }
+
+          // @ts-ignore
+          if (baseClient[normalizedModelName].fields.id?.typeName == 'BigInt') {
+            let data = Array.isArray(args.args.data) ? args.args.data : [args.args.data];
+
+            for (let item of data) {
+              // @ts-ignore
+              if (typeof item.id === 'undefined') {
+                // @ts-ignore
+                item.id = generator.nextId();
+              }
+            }
+          }
+
+          // @ts-ignore
+          if (baseClient[normalizedModelName].fields.oid?.typeName == 'Int') {
+            let data = Array.isArray(args.args.data) ? args.args.data : [args.args.data];
+
+            for (let item of data) {
+              // @ts-ignore
+              if (typeof item.oid === 'undefined') {
+                // @ts-ignore
+                item.oid = getSecureRandomInt();
+              }
+            }
+          }
+
+          // @ts-ignore
+          if (baseClient[normalizedModelName].fields.id?.typeName == 'Int') {
+            let data = Array.isArray(args.args.data) ? args.args.data : [args.args.data];
+
+            for (let item of data) {
+              // @ts-ignore
+              if (typeof item.id === 'undefined') {
+                // @ts-ignore
+                item.id = getSecureRandomInt();
+              }
+            }
+          }
+
+          return args.query(args.args);
+        },
+
+        createManyAndReturn: async args => {
+          let normalizedModelName = (args.model.charAt(0).toUpperCase() +
+            args.model.slice(1)) as 'user';
+
+          if (baseClient[normalizedModelName].fields.oid?.typeName == 'BigInt') {
+            let data = Array.isArray(args.args.data) ? args.args.data : [args.args.data];
+
+            for (let item of data) {
+              // @ts-ignore
+              if (typeof item.oid === 'undefined') {
+                // @ts-ignore
+                item.oid = generator.nextId();
+              }
+            }
+          }
+
+          // @ts-ignore
+          if (baseClient[normalizedModelName].fields.id?.typeName == 'BigInt') {
+            let data = Array.isArray(args.args.data) ? args.args.data : [args.args.data];
+
+            for (let item of data) {
+              // @ts-ignore
+              if (typeof item.id === 'undefined') {
+                // @ts-ignore
+                item.id = generator.nextId();
+              }
+            }
+          }
+
+          // @ts-ignore
+          if (baseClient[normalizedModelName].fields.oid?.typeName == 'Int') {
+            let data = Array.isArray(args.args.data) ? args.args.data : [args.args.data];
+
+            for (let item of data) {
+              // @ts-ignore
+              if (typeof item.oid === 'undefined') {
+                // @ts-ignore
+                item.oid = getSecureRandomInt();
+              }
+            }
+          }
+
+          // @ts-ignore
+          if (baseClient[normalizedModelName].fields.id?.typeName == 'Int') {
+            let data = Array.isArray(args.args.data) ? args.args.data : [args.args.data];
+
+            for (let item of data) {
+              // @ts-ignore
+              if (typeof item.id === 'undefined') {
+                // @ts-ignore
+                item.id = getSecureRandomInt();
+              }
+            }
+          }
+
+          return args.query(args.args);
+        },
+
+        upsert: async args => {
+          let normalizedModelName = (args.model.charAt(0).toUpperCase() +
+            args.model.slice(1)) as 'user';
+
+          if (baseClient[normalizedModelName].fields.oid?.typeName == 'BigInt') {
+            // @ts-ignore
+            if (typeof args.args.create.oid === 'undefined') {
+              // @ts-ignore
+              args.args.create.oid = generator.nextId();
+            }
+          }
+
+          // @ts-ignore
+          if (baseClient[normalizedModelName].fields.id?.typeName == 'BigInt') {
+            // @ts-ignore
+            if (typeof args.args.create.id === 'undefined') {
+              // @ts-ignore
+              args.args.create.id = generator.nextId();
+            }
+          }
+
+          // @ts-ignore
+          if (baseClient[normalizedModelName].fields.oid?.typeName == 'Int') {
+            // @ts-ignore
+            if (typeof args.args.create.oid === 'undefined') {
+              // @ts-ignore
+              args.args.create.oid = getSecureRandomInt();
+            }
+          }
+
+          // @ts-ignore
+          if (baseClient[normalizedModelName].fields.id?.typeName == 'Int') {
+            // @ts-ignore
+            if (typeof args.args.create.id === 'undefined') {
+              // @ts-ignore
+              args.args.create.id = getSecureRandomInt();
+            }
+          }
+
+          return args.query(args.args);
+        }
+      }
+    }
+  }) as any as PrismaClient;
+};
+
+let db: PrismaClient = createClient();
+
+export { db };
+
+export type DB = typeof db;
+
+declare global {
+  namespace PrismaJson {
+    type AuditPayload =
+      string | number | boolean | null | AuditPayload[] | { [key: string]: AuditPayload };
+    type Record = { [key: string]: any };
+    type OrganizationConfigValue = any;
+
+    type NetworkingPolicyPortRange = { from: number; to: number };
+    type NetworkingPolicyRule = {
+      id: string;
+      effect: 'allow' | 'deny';
+      direction: 'ingress' | 'egress';
+      cidrs: string[];
+      description?: string;
+      enabled: boolean;
+      priority: number;
+      ports?: NetworkingPolicyPortRange[];
+    };
+    type NetworkingPolicyRules = NetworkingPolicyRule[];
+
+    type SandboxEgressRule = {
+      action: 'allow' | 'deny';
+      protocol: 'tcp' | 'udp' | 'any';
+      cidr: string;
+      ports?: [number, number];
+    };
+    type SandboxEgressRules = SandboxEgressRule[];
+
+    type SandboxImageBuildOptions = {
+      dockerfilePath: string;
+      contextPath: string;
+      target: string | null;
+      buildArgNames: string[];
+      timeoutSeconds: number;
+    };
+    type OrganizationLayoutValue = any;
+
+    type OrganizationNotificationPayload = { [key: string]: any };
+    type OrganizationNotificationActions = {
+      variant?: 'primary' | 'secondary';
+      text: string;
+      action: { type: 'navigate'; path: string };
+    }[];
+
+    type ServerEntityAttributes = {
+      websiteUrl?: string;
+    };
+
+    type ServerConfigSchema = JSONSchema4 | JSONSchema6 | JSONSchema7;
+
+    type ServerVersionTools = Tool[] | null;
+    type ServerVersionPrompts = Prompt[] | null;
+    type ServerVersionResourceTemplates = ResourceTemplate[] | null;
+    type ServerVersionServerInfo = { name: string; version: string } | null;
+    type ServerVersionServerCapabilities = ServerCapabilities | null;
+    type ServerVersionServerInstructions = string | null;
+
+    type SessionClientInfo = { name: string; version: string };
+    type SessionClientCapabilities = ClientCapabilities;
+    type SessionServerInfo = { name: string; version: string };
+    type SessionServerCapabilities = ServerCapabilities;
+
+    type SessionMessageMcpPayload = JSONRPCMessage;
+
+    type ProviderOAuthConfigTemplateVariables = {
+      type: 'string';
+      label: string;
+      key: string;
+      description?: string;
+      isRequired?: boolean;
+    }[];
+    type ProviderOAuthConfigTemplateScopes = {
+      identifier: string;
+      description: string;
+    }[];
+
+    type ProviderOAuthConfig = any;
+
+    type CustomServerDeploymentStepLogs = (
+      [number, string[], 0 | 1 | undefined] | [number, string[], 0 | 1]
+    )[]; // ts, lines, 1=error
+
+    type CodeBucketTemplateContents = {
+      path: string;
+      content: string;
+    }[];
+
+    type Headers = [string, string][];
+
+    type PolicyDocument = {
+      access: {
+        target: string;
+        scopes?: string[];
+        roles?: string[];
+      }[];
+    };
+
+    type PortalAllowedRedirectUrlFilters = {
+      url: string;
+    }[];
+
+    type ProductAssistantConversationInput = unknown;
+    type ProductAssistantMessageStateContent = ProductAssistant.State;
+    type ProductAssistantMessageSerializedContent = ProductAssistant.MessageSerializedContent;
+    type ProductAssistantRunCost = ProductAssistant.RunCost;
+    type ProductAssistantRunMetadata = ProductAssistant.RunMetadata;
+    type ProductAssistantSubspaceMcpToolList = ProductAssistant.SubspaceMcpToolList;
+
+    type SystemEventPayload = { [key: string]: any };
+
+    type WebImageCandidate = {
+      url: string;
+      source:
+        | 'jsonld_logo'
+        | 'svg_icon'
+        | 'apple_touch_icon'
+        | 'manifest_icon'
+        | 'icon'
+        | 'mask_icon'
+        | 'og_image'
+        | 'twitter_image'
+        | 'well_known';
+      declaredWidth: number | null;
+      declaredHeight: number | null;
+      width: number | null;
+      height: number | null;
+      format: 'svg' | 'png' | 'webp' | 'jpeg' | 'gif' | 'ico' | null;
+      bytes: number | null;
+      score: number | null;
+      rejectedReason: string | null;
+    };
+    type WebImageCandidates = WebImageCandidate[];
+
+    type EventDeliveryAttemptDetails = {
+      request: {
+        url: string;
+        method: string;
+        headers: { key: string; value: string }[];
+        body: string | null;
+      };
+      response: {
+        statusCode: number;
+        headers: { key: string; value: string }[];
+        body: string | null;
+        isBodyTruncated: boolean;
+      } | null;
+    };
+  }
+}

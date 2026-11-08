@@ -1,0 +1,96 @@
+import { createCron } from '@lowerdeck/cron';
+import { combineQueueProcessors, createQueue, dailyPacedDelay } from '@lowerdeck/queue';
+import { getJsonSizeBytes, offload } from '@metorial-subspace/connection-utils';
+import { db, Prisma } from '@metorial-subspace/db';
+import { subDays } from 'date-fns';
+import { env } from '../../env';
+
+let OFFLOAD_MESSAGES_BATCH_SIZE = 500;
+
+let offloadCron = createCron(
+  {
+    name: 'sub/con/ofl/cron',
+    cron: '30 4 * * *',
+    redisUrl: env.service.REDIS_URL
+  },
+  async () => {
+    await offloadMessagesQueue.add({});
+  }
+);
+
+let offloadMessagesQueue = createQueue<{ cursor?: string }>({
+  name: 'sub/con/ofl/msg/many',
+  redisUrl: env.service.REDIS_URL,
+  workerOpts: { concurrency: 1 }
+});
+
+let offloadMessagesQueueProcessor = offloadMessagesQueue.process(async data => {
+  let twoDaysAgo = subDays(new Date(), 2);
+
+  let messages = await db.sessionMessage.findMany({
+    where: {
+      isOffloadedToStorage: false,
+      // Only `full` retains payloads; anything else has nothing to move to cold storage.
+      retentionLevel: 'full',
+      status: { in: ['failed', 'succeeded'] },
+      createdAt: { lte: twoDaysAgo },
+      id: data.cursor ? { gt: data.cursor } : undefined
+    },
+    orderBy: { id: 'asc' },
+    take: OFFLOAD_MESSAGES_BATCH_SIZE,
+    select: { id: true }
+  });
+  if (messages.length === 0) return;
+
+  await offloadMessageQueue.addMany(messages.map(msg => ({ messageId: msg.id })));
+
+  if (messages.length === OFFLOAD_MESSAGES_BATCH_SIZE) {
+    await offloadMessagesQueue.add(
+      { cursor: messages[messages.length - 1]!.id },
+      dailyPacedDelay()
+    );
+  }
+});
+
+let offloadMessageQueue = createQueue<{ messageId: string }>({
+  name: 'sub/con/ofl/msg',
+  redisUrl: env.service.REDIS_URL,
+  workerOpts: { concurrency: 5, limiter: { max: 20, duration: 1000 } }
+});
+
+let offloadMessageQueueProcessor = offloadMessageQueue.process(async data => {
+  let message = await db.sessionMessage.findUnique({
+    where: { id: data.messageId }
+  });
+  if (!message || message.isOffloadedToStorage) return;
+
+  let inputSize = message.inputSize ?? getJsonSizeBytes(message.input);
+  let outputSize = message.outputSize ?? getJsonSizeBytes(message.output);
+
+  if (message.input === null && message.output === null) {
+    await db.sessionMessage.updateMany({
+      where: { oid: message.oid, isOffloadedToStorage: false },
+      data: { isOffloadedToStorage: true, inputSize, outputSize }
+    });
+    return;
+  }
+
+  await offload.offloadSessionMessage(message);
+
+  await db.sessionMessage.updateMany({
+    where: { oid: message.oid, isOffloadedToStorage: false },
+    data: {
+      isOffloadedToStorage: true,
+      input: Prisma.DbNull,
+      output: Prisma.DbNull,
+      inputSize,
+      outputSize
+    }
+  });
+});
+
+export let offloadQueues = combineQueueProcessors([
+  offloadCron,
+  offloadMessageQueueProcessor,
+  offloadMessagesQueueProcessor
+]);

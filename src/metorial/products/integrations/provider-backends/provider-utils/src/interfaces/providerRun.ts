@@ -1,0 +1,205 @@
+import type {
+  Provider,
+  ProviderAuthConfigVersion,
+  ProviderConfigVersion,
+  ProviderDeployment,
+  ProviderRun,
+  ProviderTool,
+  ProviderVariant,
+  ProviderVersion,
+  Session,
+  SessionConnection,
+  SessionMessage,
+  SessionParticipant,
+  SessionProvider,
+  ShuttleConnection,
+  SlateSession,
+  SlateToolCall,
+  Tenant
+} from '@metorial-subspace/db';
+import type { InitializeRequest, JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
+import { IProviderFunctionality } from '../providerFunctionality';
+import type {
+  ConnectionDiagnostics,
+  ConnectionToolListRes,
+  ProviderRuntimeBehavior
+} from '../types/connection';
+
+export abstract class IProviderRun extends IProviderFunctionality {
+  abstract createProviderRun(
+    data: ProviderRunCreateParam
+  ): Promise<ProviderRunCreateRes & { connection: IProviderRunConnection }>;
+
+  abstract getProviderRunLogs(data: ProviderRunLogsParam): Promise<ProviderRunLogsRes>;
+
+  abstract getRuntimeBehavior(): ProviderRuntimeBehavior;
+
+  async callPublicTool(data: PublicToolInvocationParam): Promise<PublicToolInvocationRes> {
+    throw new Error(`Backend "${this.backend.type}" does not support calling public tools`);
+  }
+}
+
+export abstract class IProviderRunConnection {
+  #closeListeners = new Set<() => Promise<void>>();
+  #messageListeners = new Set<(data: JSONRPCMessage) => Promise<void>>();
+  #isClosed = false;
+
+  public onClose(listener: () => Promise<void>) {
+    if (this.#isClosed) {
+      listener();
+      return () => {};
+    }
+
+    this.#closeListeners.add(listener);
+    return () => this.#closeListeners.delete(listener);
+  }
+
+  public onMcpNotificationOrRequest(listener: (data: JSONRPCMessage) => Promise<void>) {
+    this.#messageListeners.add(listener);
+    return () => this.#messageListeners.delete(listener);
+  }
+
+  protected async emitClose() {
+    if (this.#isClosed) return;
+    this.#isClosed = true;
+
+    for (let listener of this.#closeListeners) {
+      await listener();
+    }
+  }
+
+  protected async emitMcpMessage(data: JSONRPCMessage) {
+    for (let listener of this.#messageListeners) {
+      await listener(data);
+    }
+  }
+
+  abstract handleToolInvocation(
+    data: ToolInvocationCreateParam
+  ): Promise<ToolInvocationCreateRes>;
+
+  abstract handleMcpResponseOrNotification(
+    data: HandleMcpNotificationOrRequestParam
+  ): Promise<HandleMcpNotificationOrRequestRes>;
+
+  abstract listConnectionTools(): Promise<ConnectionToolListRes>;
+
+  abstract getConnectionDiagnostics(): Promise<ConnectionDiagnostics>;
+
+  abstract close(): Promise<void>;
+}
+
+export interface ProviderRunCreateParam {
+  tenant: Tenant;
+  provider: Provider;
+  providerRun: ProviderRun;
+
+  providerVariant: ProviderVariant;
+  providerVersion: ProviderVersion;
+  providerDeployment: ProviderDeployment;
+  providerConfigVersion: ProviderConfigVersion;
+  providerAuthConfigVersion: ProviderAuthConfigVersion | null;
+
+  session: Session;
+  connection: SessionConnection;
+  participant: SessionParticipant;
+  adapter: {
+    id: string;
+    identifier: string;
+    name: string;
+  } | null;
+
+  mcp: {
+    clientInfo: InitializeRequest['params']['clientInfo'];
+    capabilities: InitializeRequest['params']['capabilities'];
+  } | null;
+}
+
+export interface ProviderRunCreateRes {
+  slateSession?: SlateSession;
+  shuttleConnection?: ShuttleConnection;
+}
+
+export interface ToolInvocationCreateParam {
+  tool: ProviderTool;
+  sender: SessionParticipant;
+
+  input: PrismaJson.SessionMessageInput;
+  message: SessionMessage;
+  sessionProvider: SessionProvider;
+}
+
+export interface ProviderInvocationError {
+  code: string;
+  message: string;
+  [key: string]: unknown;
+}
+
+export interface ToolInvocationCreateRes {
+  slateToolCall?: SlateToolCall;
+  output?:
+    | {
+        type: 'success';
+        data: PrismaJson.SessionMessageOutput;
+      }
+    | {
+        type: 'error';
+        error: ProviderInvocationError;
+      };
+}
+
+export interface HandleMcpNotificationOrRequestParam {
+  sender: SessionParticipant;
+  input: JSONRPCMessage;
+  message: SessionMessage;
+}
+
+export interface HandleMcpNotificationOrRequestRes {
+  slateToolCall?: SlateToolCall;
+  output?: {
+    type: 'error';
+    error: ProviderInvocationError;
+  };
+}
+
+export interface ProviderRunLogsParam {
+  tenant: Tenant;
+  providerRun: ProviderRun;
+  sessionMessageIds?: string[];
+}
+
+export interface ProviderRunLog {
+  timestamp: Date;
+  message: string;
+  outputType: 'stdout' | 'stderr' | 'debug.info' | 'debug.warning' | 'debug.error';
+}
+
+export interface ProviderRunLogsRes {
+  logs: ProviderRunLog[];
+}
+
+export interface PublicToolInvocationParam {
+  tenant: Tenant;
+  provider: Provider;
+  providerVariant: ProviderVariant;
+  providerVersion: ProviderVersion;
+
+  toolKey: string;
+  input: Record<string, any>;
+
+  caller?: {
+    id: string;
+    name: string;
+    description?: string;
+  };
+}
+
+export interface PublicToolInvocationRes {
+  status: 'success' | 'error';
+
+  output?: Record<string, any>;
+  message?: string;
+  attachments?: any[];
+
+  error?: ProviderInvocationError;
+}

@@ -1,0 +1,74 @@
+import { Text, theme, Title } from '@metorial/ui';
+import React from 'react';
+import { styled } from 'styled-components';
+
+let Wrapper = styled.div`
+  border: 1px solid ${theme.colors.gray400};
+  box-shadow: ${theme.shadows.small};
+  background: ${theme.colors.gray100};
+  border-radius: 8px;
+`;
+
+let Header = styled.header`
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  padding: 10px 10px 0px 18px;
+  align-items: center;
+`;
+
+let HeaderContent = styled.div`
+  display: flex;
+  flex-direction: column;
+  gap: 0px;
+`;
+
+let RightActions = styled.nav`
+  display: flex;
+  gap: 10px;
+`;
+
+let Content = styled.main<{ $noPadding?: boolean }>`
+  padding: 12px 17px;
+  background: ${theme.colors.background};
+  border-radius: 8px;
+  border: 1px solid ${theme.colors.gray400};
+  margin-left: -1px;
+  margin-right: -1px;
+  margin-bottom: -1px;
+  overflow: hidden;
+
+  ${({ $noPadding }) => $noPadding && `padding: 0px;`}
+`;
+
+export type BoxProps = {
+  title: React.ReactNode;
+  description?: React.ReactNode;
+  children: React.ReactNode;
+  rightActions?: React.ReactNode;
+  noPadding?: boolean;
+};
+
+export let Box = ({ title, description, children, rightActions, noPadding }: BoxProps) => {
+  return (
+    <Wrapper>
+      <Header>
+        <HeaderContent>
+          <Title as="h2" size="2" weight="strong">
+            {title}
+          </Title>
+          {description && (
+            <Text size="1" weight="strong" color="gray600">
+              {description}
+            </Text>
+          )}
+        </HeaderContent>
+
+        {rightActions && <RightActions>{rightActions}</RightActions>}
+      </Header>
+
+      <Content $noPadding={noPadding}>{children}</Content>
+    </Wrapper>
+  );
+};

@@ -1,0 +1,282 @@
+import { badRequestError, ServiceError, validationError } from '@lowerdeck/error';
+import { type ValidationTypeValue, v } from '@lowerdeck/validation';
+import semver from 'semver';
+import { getSlatePackageChecksum, type SlatePackageEntry } from './archive';
+
+export type NormalizedSlatePackage = {
+  docsFiles: {
+    path: string;
+    content: string;
+  }[];
+  fullIdentifier: string;
+  scopeIdentifier: string;
+  slateIdentifier: string;
+  manifest: ValidationTypeValue<typeof slateJsonValidation>;
+  contentChecksum: string;
+  isPrebuilt?: boolean;
+};
+
+// Identifiers end up in URL paths.
+let identifierSegmentPattern = /^[A-Za-z0-9_][A-Za-z0-9._-]*$/;
+
+export let parseSlateFullIdentifier = (name: string) => {
+  let fullIdentifier = name.replace(/^@/, '');
+  let [scopeIdentifier, slateIdentifier, ...rest] = fullIdentifier.split('/');
+
+  if (
+    !scopeIdentifier ||
+    !slateIdentifier ||
+    rest.length > 0 ||
+    !identifierSegmentPattern.test(scopeIdentifier) ||
+    !identifierSegmentPattern.test(slateIdentifier)
+  ) {
+    return null;
+  }
+
+  return { fullIdentifier, scopeIdentifier, slateIdentifier };
+};
+
+// AWS Lambda caps function timeouts at 900 seconds and Function Bay passes the
+// value through unclamped, so out-of-range manifests must be rejected at publish
+// time instead of failing the deployment later.
+let timeoutValidation = v.optional(
+  v.number({
+    modifiers: [
+      v.integer({ message: 'Timeout must be a whole number of seconds.' }),
+      v.minValue(1, { message: 'Timeout must be at least 1 second.' }),
+      v.maxValue(900, {
+        message: 'Timeout must be at most 900 seconds (the AWS Lambda maximum).'
+      })
+    ]
+  })
+);
+
+let rawSlateJsonValidation = v.object({
+  name: v.string(),
+  description: v.optional(v.string()),
+  categories: v.optional(v.array(v.string())),
+  skills: v.optional(v.array(v.string())),
+  logoUrl: v.optional(v.string()),
+  networkIsolation: v.optional(v.boolean()),
+  timeout: timeoutValidation
+});
+
+let packageJsonValidation = v.object({
+  name: v.string(),
+  version: v.string({
+    modifiers: [
+      value => {
+        if (!semver.valid(value)) {
+          return [
+            {
+              code: 'invalid_semver',
+              message: 'Version is not a valid semver string.'
+            }
+          ];
+        }
+
+        return [];
+      }
+    ]
+  }),
+  description: v.optional(v.string())
+});
+
+export let slateJsonValidation = v.object({
+  name: v.string(),
+  version: v.string({
+    modifiers: [
+      value => {
+        if (!semver.valid(value)) {
+          return [
+            {
+              code: 'invalid_semver',
+              message: 'Version is not a valid semver string.'
+            }
+          ];
+        }
+
+        return [];
+      }
+    ]
+  }),
+  description: v.optional(v.string()),
+  categories: v.optional(v.array(v.string())),
+  skills: v.optional(v.array(v.string())),
+  logoUrl: v.optional(v.string()),
+  networkIsolation: v.optional(v.boolean()),
+  timeout: timeoutValidation
+});
+
+let parseJsonFile = <T>(d: {
+  content: string;
+  path: string;
+  validation: {
+    validate: (
+      value: unknown
+    ) => { success: true; value: T } | { success: false; errors: unknown };
+  };
+}) => {
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(d.content);
+  } catch {
+    throw new ServiceError(
+      badRequestError({
+        message: `${d.path} is not valid JSON.`
+      })
+    );
+  }
+
+  let validationResult = d.validation.validate(parsed);
+  if (!validationResult.success) {
+    throw new ServiceError(
+      validationError({
+        message: `${d.path} is invalid.`,
+        entity: d.path,
+        errors: validationResult.errors as never
+      })
+    );
+  }
+
+  return validationResult.value;
+};
+
+export let normalizeSlatePackage = (d: {
+  entries: SlatePackageEntry[];
+  identifier: {
+    scopeIdentifier: string;
+    slateIdentifier: string;
+  } | null;
+  versionOverride?: string;
+}) => {
+  let docsFiles: {
+    path: string;
+    content: string;
+  }[] = [];
+  let rawSlateJson: ValidationTypeValue<typeof rawSlateJsonValidation> | null = null;
+  let packageJson: ValidationTypeValue<typeof packageJsonValidation> | null = null;
+  let isPrebuilt = false;
+
+  for (let entry of d.entries) {
+    let lowerPath = entry.path.toLowerCase();
+
+    while (lowerPath.startsWith('./')) lowerPath = lowerPath.slice(2);
+    while (lowerPath.startsWith('/')) lowerPath = lowerPath.slice(1);
+
+    if (lowerPath.startsWith('dist/')) isPrebuilt = true;
+
+    if (lowerPath === 'slate.json') {
+      rawSlateJson = parseJsonFile({
+        content: entry.buffer.toString('utf-8'),
+        path: 'slate.json',
+        validation: rawSlateJsonValidation
+      });
+    }
+
+    if (lowerPath === 'package.json') {
+      packageJson = parseJsonFile({
+        content: entry.buffer.toString('utf-8'),
+        path: 'package.json',
+        validation: packageJsonValidation
+      });
+    }
+
+    if (
+      (!entry.path.startsWith('docs/') || !lowerPath.endsWith('.md')) &&
+      lowerPath !== 'readme.md'
+    ) {
+      continue;
+    }
+
+    docsFiles.push({
+      path: entry.path,
+      content: entry.buffer.toString('utf-8')
+    });
+  }
+
+  if (!rawSlateJson) {
+    throw new ServiceError(
+      badRequestError({
+        message: 'slate.json is required in the root of the project archive.'
+      })
+    );
+  }
+
+  if (!packageJson) {
+    throw new ServiceError(
+      badRequestError({
+        message: 'package.json is required in the root of the project archive.'
+      })
+    );
+  }
+
+  if (d.versionOverride && d.versionOverride !== packageJson.version) {
+    throw new ServiceError(
+      badRequestError({
+        message: 'Requested version must match package.json version.'
+      })
+    );
+  }
+
+  let normalizedVersion = semver.valid(packageJson.version);
+  if (!normalizedVersion) {
+    throw new ServiceError(
+      badRequestError({
+        message: `Version ${packageJson.version} is not a valid semver version.`
+      })
+    );
+  }
+
+  let manifest = {
+    name: rawSlateJson.name,
+    version: normalizedVersion,
+    description: rawSlateJson.description ?? packageJson.description,
+    categories: rawSlateJson.categories,
+    skills: rawSlateJson.skills,
+    logoUrl: rawSlateJson.logoUrl,
+    networkIsolation: rawSlateJson.networkIsolation,
+    timeout: rawSlateJson.timeout
+  } satisfies ValidationTypeValue<typeof slateJsonValidation>;
+
+  let validationResult = slateJsonValidation.validate(manifest);
+  if (!validationResult.success) {
+    throw new ServiceError(
+      validationError({
+        message: 'Normalized slate metadata is invalid.',
+        entity: 'slate.json',
+        errors: validationResult.errors as never
+      })
+    );
+  }
+
+  if (d.identifier) {
+    let expectedName = `@${d.identifier.scopeIdentifier}/${d.identifier.slateIdentifier}`;
+    if (manifest.name !== expectedName) {
+      throw new ServiceError(
+        badRequestError({
+          message: `Package name "${manifest.name}" does not match scope/slate identifier.`
+        })
+      );
+    }
+  }
+
+  let identifier = parseSlateFullIdentifier(manifest.name);
+  if (!identifier) {
+    throw new ServiceError(
+      badRequestError({
+        message:
+          'Package name must be in the format @scope/identifier, using letters, digits, ".", "_" and "-".'
+      })
+    );
+  }
+
+  return {
+    isPrebuilt,
+    docsFiles,
+    ...identifier,
+    manifest,
+    contentChecksum: getSlatePackageChecksum(d.entries)
+  } satisfies NormalizedSlatePackage;
+};

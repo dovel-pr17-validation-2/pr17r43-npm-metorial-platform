@@ -1,0 +1,41 @@
+model Tenant {
+  oid BigInt @id
+  id  String @unique
+
+  identifier String @unique
+  name       String
+
+  functionBayTenantId String?
+  nebulaTenantId      String?
+
+  logRetentionInDays Int     @default(30)
+  storeContent       Boolean @default(true)
+  collectErrors      Boolean @default(true)
+
+  createdAt DateTime @default(now())
+
+  secrets                            Secret[]
+  registries                         ContainerRegistry[]
+  repositories                       ContainerRepository[]
+  repositoryTags                     ContainerRepositoryTag[]
+  repositoryVersions                 ContainerRepositoryVersion[]
+  serverConfigs                      ServerConfig[]
+  serverInstanceConfigurations       ServerInstanceConfiguration[]
+  serverConnections                  ServerConnection[]
+  serverDiscoveries                  ServerDiscovery[]
+  servers                            Server[]
+  serverVersions                     ServerVersion[]
+  remoteOAuthConnections             RemoteOAuthConnection[]
+  remoteOAuthConnectionProfiles      RemoteOAuthConnectionProfile[]
+  remoteOAuthConnectionSetups        RemoteOAuthConnectionSetup[]
+  remoteOAuthConnectionAuthTokens    RemoteOAuthConnectionAuthToken[]
+  serverAuthConfigs                  ServerAuthConfig[]
+  serverOAuthSetups                  ServerOAuthSetup[]
+  serverOAuthCredentials             ServerOAuthCredentials[]
+  delegatedOAuthConnections          DelegatedOAuthConnection[]
+  delegatedOAuthConnectionSetups     DelegatedOAuthConnectionSetup[]
+  delegatedOAuthConnectionAuthTokens DelegatedOAuthConnectionAuthToken[]
+  upcomingFunctionServers            UpcomingFunctionServer[]
+  serverDeployments                  ServerDeployment[]
+  functionServerInvocations          FunctionServerInvocation[]
+}

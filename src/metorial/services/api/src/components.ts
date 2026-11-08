@@ -1,0 +1,79 @@
+process.env.TZ = 'UTC';
+
+import { apiMux } from '@lowerdeck/api-mux';
+import { authApi } from '@metorial/api-auth';
+import { startMcpServer } from '@metorial/api-connection';
+import { apiServer } from '@metorial/api-core';
+import { integrationsApi, subspaceInternalApi } from '@metorial/api-integrations';
+import { fileContentApi, fileUploadApi } from '@metorial/api-files';
+import { outpostApi } from '@metorial/api-outpost';
+import { authenticate } from '@metorial/auth';
+
+let { initializeSnowflakeWorkerLease } = await import('@metorial-subspace/db');
+await initializeSnowflakeWorkerLease({ redisUrl: process.env.REDIS_URL });
+
+let apiPort = parseInt(process.env.API_PORT || '4310');
+let filesPort = parseInt(process.env.FILES_PORT || '4318');
+let mcpPort = parseInt(process.env.MCP_PORT || '4311');
+let runnerPort = parseInt(process.env.RUNNER_PORT || '3399');
+let privateApiPort = parseInt(process.env.PRIVATE_API_PORT || '4314');
+let integrationsApiPort = parseInt(process.env.INTEGRATIONS_API_PORT || '4316');
+let subspaceInternalApiPort = parseInt(process.env.SUBSPACE_INTERNAL_API_PORT || '4317');
+
+let server = apiMux(
+  [
+    {
+      endpoint: {
+        path: '/_/auth',
+        fetch: authApi.fetch as any
+      }
+    },
+    {
+      methods: ['POST', 'OPTIONS'],
+      endpoint: {
+        path: '/files',
+        exact: true,
+        fetch: fileUploadApi.fetch as any
+      }
+    },
+    {
+      endpoint: {
+        path: '/outpost',
+        fetch: outpostApi.fetch as any
+      }
+    }
+  ],
+  apiServer.fetch
+);
+
+Bun.serve({
+  port: apiPort,
+  idleTimeout: 250,
+  fetch: server
+});
+
+Bun.serve({
+  port: integrationsApiPort,
+  fetch: integrationsApi.fetch
+});
+
+Bun.serve({
+  port: subspaceInternalApiPort,
+  fetch: subspaceInternalApi
+});
+
+Bun.serve({
+  port: filesPort,
+  fetch: fileContentApi.fetch
+});
+
+startMcpServer({ port: mcpPort, authenticate });
+
+if (process.env.NODE_ENV == 'production' && process.env.METORIAL_SOURCE == 'enterprise') {
+  Bun.serve({
+    fetch: req => new Response('ok'),
+    port: 5000
+  });
+}
+
+console.log(`Listening on ports ${apiPort} (api), ${filesPort} (files), (portals)`);

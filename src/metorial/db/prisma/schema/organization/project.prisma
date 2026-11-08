@@ -1,0 +1,124 @@
+enum ProjectStatus {
+  active
+  deleted
+}
+
+enum ProjectDataRetentionLevel {
+  full
+  intent_only
+  none
+}
+
+model Project {
+  oid BigInt @id @default(autoincrement())
+  id  String @unique
+
+  status ProjectStatus
+
+  slug          String   @unique
+  previousSlugs String[]
+  name          String
+
+  hidePublicRemoteProviders Boolean @default(false)
+
+  onlyAllowTrustedProviders      Boolean @default(false)
+  magicMcpSessionDurationMinutes Int     @default(1440)
+
+  logRetentionInDays   Int     @default(30)
+  enforceSessionExpiry Boolean @default(false)
+
+  allowAuthConfigExport     Boolean @default(false)
+  allowAuthConfigImport     Boolean @default(false)
+  onlyAllowOAuthAuthMethods Boolean @default(false)
+
+  dataRetentionLevel       ProjectDataRetentionLevel @default(full)
+  storeToolCallAttachments Boolean                   @default(true)
+  collectErrors            Boolean                   @default(true)
+  disableCallbacks         Boolean                   @default(false)
+
+  collectOperationDescriptionForToolCalls Boolean @default(true)
+  messageProcessingTimeoutMs              Int     @default(30000)
+
+  sessionlessMcpEnabled Boolean?
+
+  useIntegrationNamesForSessionProviderNameTemplates Boolean @default(false)
+
+  skillSyncGitLfsThresholdBytes Int?
+
+  organizationOid BigInt
+  organization    Organization @relation(fields: [organizationOid], references: [oid], onDelete: Cascade)
+
+  internalTenantIdentifier String? @map("subspaceTenantIdentifier")
+
+  subspaceTenantId  String?
+  cargoTenantId     String?
+  synthesisTenantId String?
+  nebulaTenantId    String?
+
+  resourceTenantOid BigInt?         @unique
+  resourceTenant    ResourceTenant? @relation(fields: [resourceTenantOid], references: [oid], onDelete: SetNull)
+
+  resourceGroupOid BigInt?        @unique
+  resourceGroup    ResourceGroup? @relation(fields: [resourceGroupOid], references: [oid], onDelete: SetNull)
+
+  consumerAuthClientRegistrationsPerMinuteLimit Int @default(10)
+  consumerAuthClientRegistrationsPerHourLimit   Int @default(25)
+
+  autoAddOrganizationMembersToPortals    Boolean @default(false)
+  allowConsumerSkillEditing              Boolean @default(true)
+  allowOrganizationMemberFullSkillAccess Boolean @default(false)
+
+  reducedSubprocessors Boolean @default(false)
+
+  allowApiAccessToConsumerOwnedResources    Boolean @default(true)
+  allowMemberAccessToConsumerOwnedResources Boolean @default(true)
+
+  createdAt DateTime  @default(now())
+  deletedAt DateTime?
+  updatedAt DateTime  @default(now()) @updatedAt
+
+  instances            Instance[]
+  accessPolicyProjects AccessPolicyProject[]
+  brand                ProjectBrand?
+  teams                TeamProject[]
+
+  resourceActors        ResourceActor[]
+  fileLinks             FileLink[]
+  fileReferences        FileReference[]
+  documents             Document[]
+  documentVersions      DocumentVersion[]
+  stores                Store[]
+  storeTemplates        StoreTemplate[]
+  storeTemplateBackings StoreTemplateBacking[]
+  skills                Skill[]
+  skillConfigurations   SkillConfiguration[]
+  skillTemplates        SkillTemplate[]
+  skillMarketplaces     SkillMarketplace[]
+  skillPlugins          SkillPlugin[]
+  skillRepositories     SkillRepository[]
+  skillExports          SkillExport[]
+  skillExportRefs       SkillExportRef[]
+  skillImports          SkillImport[]
+  skillMergeRequests    SkillMergeRequest[]
+  skillForkSyncs        SkillForkSync[]
+
+  productAssistants                      ProductAssistant[]
+  productAssistantConfig                 ProductAssistantConfig?
+  productAssistantInstances              ProductAssistantInstance[]
+  productAssistantConversations          ProductAssistantConversation[]
+  productAssistantModelRuns              ProductAssistantModelRun[]
+  productAssistantSubspaceMcpConnections ProductAssistantSubspaceMcpConnection[]
+  outpostAccesses                        OutpostAccess[]
+  sandboxTenants                         SandboxTenant[]
+  sandboxMachines                        SandboxMachine[]
+  sandboxMachineImages                   SandboxMachineImage[]
+  sandboxDisks                           SandboxDisk[]
+  firewalls                              Firewall[]
+  networkPolicies                        NetworkPolicy[]
+  sandboxEgressPolicies                  SandboxEgressPolicy[]
+  identityActors                         IdentityActor[]
+  agents                                 Agent[]
+  agentClients                           AgentClient[]
+
+  @@index([previousSlugs])
+}

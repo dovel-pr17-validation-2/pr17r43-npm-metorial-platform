@@ -1,0 +1,37 @@
+import type { AuditScope } from '@metorial/audit-scope';
+import {
+  ConsumerGroup,
+  ConsumerProfile,
+  ConsumerSurface,
+  MagicMcpServer,
+  Organization
+} from '@metorial/db';
+import { consumerAccessService } from '@metorial/module-consumer-access';
+import { consumerIntegrationService } from '@metorial/module-consumer-entities';
+
+export let grantConsumerOwnedMagicMcpServerAccess = async (d: {
+  organization: Organization;
+  consumerProfile: Pick<ConsumerProfile, 'oid' | 'instanceOid' | 'consumerOid'> & {
+    surface: ConsumerSurface;
+    personalConsumerGroup: ConsumerGroup;
+  };
+  magicMcpServer: MagicMcpServer;
+  auditScope: AuditScope;
+}) => {
+  await consumerAccessService.createConsumerAccess({
+    organization: d.organization,
+    consumerSurface: d.consumerProfile.surface,
+    consumerGroup: d.consumerProfile.personalConsumerGroup,
+    auditScope: d.auditScope,
+    access: {
+      type: 'magic_mcp_server',
+      magicMcpServer: d.magicMcpServer
+    }
+  });
+
+  await consumerIntegrationService.upsertConsumerIntegration({
+    consumerProfile: d.consumerProfile,
+    magicMcpServer: d.magicMcpServer,
+    isManaged: false
+  });
+};

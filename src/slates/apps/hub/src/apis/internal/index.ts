@@ -1,0 +1,82 @@
+import { apiMux } from '@lowerdeck/api-mux';
+import { createServer, type InferClient, rpcMux } from '@lowerdeck/rpc-server';
+import { app } from './_app';
+import { callbackController } from './callback';
+import { callbackInstanceController } from './callbackInstance';
+import { changeNotificationController } from './changeNotification';
+import { registryController } from './registry';
+import { secretController } from './secret';
+import { slateController } from './slate';
+import { slateAuthConfigController } from './slateAuthConfig';
+import { slateAuthConfigEventController } from './slateAuthConfigEvent';
+import { slateDeploymentController } from './slateDeployment';
+import { slateDiscoveryController } from './slateDiscovery';
+import { slateErrorController } from './slateError';
+import { slateEventController } from './slateEvent';
+import { slateInstanceController } from './slateInstance';
+import { slateInstanceConfigurationController } from './slateInstanceConfiguration';
+import { slateInvocationController } from './slateInvocation';
+import { slateOAuthCredentialsController } from './slateOAuthCredentials';
+import { slateOAuthSetupController } from './slateOAuthSetup';
+import { slateOAuthSetupEventController } from './slateOAuthSetupEvent';
+import { slatePublicToolCallController } from './slatePublicToolCall';
+import { slateSessionController } from './slateSession';
+import { slateSessionToolCallController } from './slateSessionToolCall';
+import { slateSpecificationController } from './slateSpecification';
+import { slateSpecificationChangeController } from './slateSpecificationChange';
+import { slateVersionController } from './slateVersion';
+import { slateVersionDiscoveryController } from './slateVersionDiscovery';
+import { slateWebhookEventController } from './slateWebhookEvent';
+import { slateWebhookRegistrationController } from './slateWebhookRegistration';
+import { tenantController } from './tenant';
+import { tenantIsolationController } from './tenantIsolation';
+import { triggerEventController } from './triggerEvent';
+import { triggerEventInvocationController } from './triggerEventInvocation';
+import { triggerRegistrationController } from './triggerRegistration';
+
+export let rootController = app.controller({
+  tenant: tenantController,
+  tenantIsolation: tenantIsolationController,
+  secret: secretController,
+
+  registry: registryController,
+
+  changeNotification: changeNotificationController,
+
+  slate: slateController,
+  slateVersion: slateVersionController,
+  slateInvocation: slateInvocationController,
+  slateDeployment: slateDeploymentController,
+  slateError: slateErrorController,
+  slateDiscovery: slateDiscoveryController,
+  slateEvent: slateEventController,
+  slateSpecification: slateSpecificationController,
+  slateInstance: slateInstanceController,
+  slateInstanceConfiguration: slateInstanceConfigurationController,
+  slateOAuthCredentials: slateOAuthCredentialsController,
+  slateOAuthSetup: slateOAuthSetupController,
+  slateOAuthSetupEvent: slateOAuthSetupEventController,
+  slateAuthConfig: slateAuthConfigController,
+  slateAuthConfigEvent: slateAuthConfigEventController,
+  slateSession: slateSessionController,
+  slateSessionToolCall: slateSessionToolCallController,
+  slatePublicToolCall: slatePublicToolCallController,
+
+  slateVersionDiscovery: slateVersionDiscoveryController,
+  slateSpecificationChange: slateSpecificationChangeController,
+  slateWebhookRegistration: slateWebhookRegistrationController,
+  slateWebhookEvent: slateWebhookEventController,
+  triggerRegistration: triggerRegistrationController,
+  triggerEvent: triggerEventController,
+  triggerEventInvocation: triggerEventInvocationController,
+
+  callback: callbackController,
+  callbackInstance: callbackInstanceController
+});
+
+export let slatesHubRPC = createServer({})(rootController);
+export let slatesHubApi = apiMux([
+  { endpoint: rpcMux({ path: '/slates-hub' }, [slatesHubRPC]) }
+]);
+
+export type SlatesHubClient = InferClient<typeof rootController>;

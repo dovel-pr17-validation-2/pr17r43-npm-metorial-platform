@@ -1,0 +1,144 @@
+import { badRequestError, ServiceError } from '@lowerdeck/error';
+import { Paginator } from '@lowerdeck/pagination';
+import { v } from '@lowerdeck/validation';
+import { providerRunLogsService, providerRunService } from '@metorial-subspace/module-session';
+import { Controller } from '@metorial/rest';
+import { dateFilterValidator } from '../../../lib/dateFilter';
+import { normalizeArrayParam } from '../../../lib/normalizeArrayParam';
+import { getOwnershipActor } from '../../../lib/ownershipActor';
+import { checkAccess } from '../../../middleware/checkAccess';
+import { requireNonPublishableMachineAccess } from '../../../middleware/requireNonPublishableMachineAccess';
+import { integrationsGroup, instancePath } from '../../../middleware/instanceGroup';
+import { providerRunLogsPresenter, subspaceProviderRunPresenter } from '@metorial/presenters';
+
+let providerRunGroup = integrationsGroup.use(async ctx => {
+  if (!ctx.params.providerRunId) {
+    throw new ServiceError(
+      badRequestError({
+        message: 'providerRunId is required',
+        description: 'The providerRunId path parameter is required.'
+      })
+    );
+  }
+
+  let providerRun = await providerRunService.getProviderRunById({
+    instance: ctx.instance,
+    organizationActor: getOwnershipActor(ctx),
+    providerRunId: ctx.params.providerRunId
+  });
+
+  return { providerRun };
+});
+
+export let providerRunController = Controller.create(
+  {
+    name: 'Provider Runs',
+    description:
+      'Provider runs track the execution of provider operations within a session. This read-only resource provides visibility into provider activity.'
+  },
+  {
+    list: integrationsGroup
+      .get(instancePath('provider-runs', 'providerRuns.list'), {
+        name: 'List all provider runs',
+        description: 'Returns a paginated list of provider runs across all sessions.'
+      })
+      .use(requireNonPublishableMachineAccess())
+      .use(checkAccess({ possibleScopes: ['instance.provider.session:read'] }))
+      .outputList(subspaceProviderRunPresenter)
+      .query(
+        'default',
+        Paginator.validate(
+          v.object({
+            status: v.optional(
+              v.union([
+                v.enumOf(['running', 'stopped']),
+                v.array(v.enumOf(['running', 'stopped']))
+              ]),
+              { description: 'Filter by run status' }
+            ),
+            id: v.optional(v.union([v.string(), v.array(v.string())]), {
+              description: 'Filter by provider run ID(s)'
+            }),
+            session_id: v.optional(v.union([v.string(), v.array(v.string())]), {
+              description: 'Filter by session ID(s)'
+            }),
+            provider_id: v.optional(v.union([v.string(), v.array(v.string())]), {
+              description: 'Filter by provider ID(s)'
+            }),
+            session_provider_id: v.optional(v.union([v.string(), v.array(v.string())]), {
+              description: 'Filter by session provider ID(s)'
+            }),
+            session_connection_id: v.optional(v.union([v.string(), v.array(v.string())]), {
+              description: 'Filter by session connection ID(s)'
+            }),
+            provider_version_id: v.optional(v.union([v.string(), v.array(v.string())]), {
+              description: 'Filter by provider version ID(s)'
+            }),
+            created_at: dateFilterValidator('provider run creation time'),
+            updated_at: dateFilterValidator('provider run last update time')
+          })
+        )
+      )
+      .do(async ctx => {
+        let paginator = await providerRunService.listProviderRuns({
+          instance: ctx.instance,
+          organizationActor: getOwnershipActor(ctx),
+          allowDeleted: false,
+
+          ids: normalizeArrayParam(ctx.query.id),
+          sessionIds: normalizeArrayParam(ctx.query.session_id),
+          providerIds: normalizeArrayParam(ctx.query.provider_id),
+          sessionProviderIds: normalizeArrayParam(ctx.query.session_provider_id),
+          sessionConnectionIds: normalizeArrayParam(ctx.query.session_connection_id),
+          providerVersionIds: normalizeArrayParam(ctx.query.provider_version_id),
+          status: normalizeArrayParam(ctx.query.status),
+          createdAt: ctx.query.created_at,
+          updatedAt: ctx.query.updated_at
+        });
+
+        let list = await paginator.run(ctx.query);
+
+        return Paginator.present(list, providerRun =>
+          subspaceProviderRunPresenter.present({
+            providerRun
+          })
+        );
+      }),
+
+    get: providerRunGroup
+      .get(instancePath('provider-runs/:providerRunId', 'providerRuns.get'), {
+        name: 'Get provider run',
+        description: 'Retrieves a specific provider run by ID.'
+      })
+      .use(requireNonPublishableMachineAccess())
+      .use(checkAccess({ possibleScopes: ['instance.provider.session:read'] }))
+      .output(subspaceProviderRunPresenter)
+      .do(async ctx => {
+        return subspaceProviderRunPresenter.present({
+          providerRun: ctx.providerRun
+        });
+      }),
+
+    getLogs: integrationsGroup
+      .get(instancePath('provider-runs/:providerRunId/logs', 'providerRuns.getLogs'), {
+        name: 'Get provider run logs',
+        description: 'Retrieves the logs for a specific provider run.'
+      })
+      .use(requireNonPublishableMachineAccess())
+      .use(checkAccess({ possibleScopes: ['instance.provider.session:read'] }))
+      .output(providerRunLogsPresenter)
+      .do(async ctx => {
+        let providerRun = await providerRunService.getProviderRunById({
+          instance: ctx.instance,
+          organizationActor: getOwnershipActor(ctx),
+          providerRunId: ctx.params.providerRunId
+        });
+        let logs = await providerRunLogsService.getProviderRunLogs({
+          instance: ctx.instance,
+          providerRun,
+          inputs: {}
+        });
+        return providerRunLogsPresenter.present({ logs });
+      })
+  }
+);

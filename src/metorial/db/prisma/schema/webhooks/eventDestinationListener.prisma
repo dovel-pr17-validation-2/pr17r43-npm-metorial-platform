@@ -1,0 +1,46 @@
+enum EventDestinationListenerType {
+  event
+  callback
+  chat
+}
+
+model EventDestinationListener {
+  oid BigInt @id @default(autoincrement())
+  id  String @unique
+
+  type EventDestinationListenerType
+
+  instanceOid BigInt
+  instance    Instance @relation(fields: [instanceOid], references: [oid], onDelete: Cascade)
+
+  // populated when type = event and type = chat
+  eventTypes String[]
+
+  // populated when type = callback
+  callbackId String?
+  triggers   String[]
+
+  // populated when type = chat
+  chatConnectionId String?
+
+  // populated when type = callback or chat, no callback or chat identifier, then optionally
+  // the user can choose to match all chat or callback instances for the given provider
+  providerId String?
+
+  eventDestinationOid BigInt
+  eventDestination    EventDestination @relation(fields: [eventDestinationOid], references: [oid], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  deliveryIntents EventDeliveryIntent[]
+
+  @@index([eventDestinationOid])
+  @@index([instanceOid])
+  @@index([instanceOid, type])
+  @@index([type, callbackId])
+  @@index([type, chatConnectionId])
+  @@index([type, providerId])
+  @@index([eventTypes], type: Gin)
+  @@index([triggers], type: Gin)
+}

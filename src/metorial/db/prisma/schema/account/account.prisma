@@ -1,0 +1,32 @@
+model Account {
+  oid BigInt @id @default(autoincrement())
+  id  String @unique
+
+  organizationOid BigInt?       @map("ownerOrganizationOid")
+  organization    Organization? @relation("AccountOwnerOrganization", fields: [organizationOid], references: [oid], onDelete: Cascade)
+
+  rootOwnerAccountOid BigInt?
+  rootOwnerAccount    Account?  @relation("AccountRootOwnerAccount", fields: [rootOwnerAccountOid], references: [oid], onDelete: Cascade)
+  allChildAccounts    Account[] @relation("AccountRootOwnerAccount")
+
+  ownerAccountOid     BigInt?
+  ownerAccount        Account?  @relation("AccountOwnerAccount", fields: [ownerAccountOid], references: [oid], onDelete: Cascade)
+  directChildAccounts Account[] @relation("AccountOwnerAccount")
+
+  cellOid Int?
+  cell    Cell? @relation(fields: [cellOid], references: [oid], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  workspaces           Workspace[]
+  namespaces           Namespace[]
+  workspaceProfiles    WorkspaceProfile[]
+  workspaceInvites     WorkspaceInvite[]
+  workspaceGroups      WorkspaceGroup[]
+  workspacePolicies    WorkspacePolicy[]
+  accountDomains       AccountDomain[]
+  namespaceProperties  NamespaceProperty[]
+  outposts             Outpost[]
+  outpostTokenKeyPairs OutpostTokenKeyPair[]
+}

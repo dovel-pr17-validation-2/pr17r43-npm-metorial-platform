@@ -1,0 +1,40 @@
+import { renderWithLoader } from '@metorial/data-hooks';
+import { DetailsTableLayout } from '@metorial/details-layout';
+import { useCurrentInstance, useCustomProvider } from '@metorial/state';
+import { Panel } from '@metorial/ui';
+import { useParams } from 'react-router-dom';
+import { CustomProviderVersion } from '../../../scenes/customProvider/version';
+import { CustomProviderVersionsTable } from '../../../scenes/customProvider/versions';
+import { RouterPanel } from '../../../scenes/routerPanel';
+
+export let CustomProviderVersionsPage = () => {
+  let instance = useCurrentInstance();
+
+  let { customProviderId } = useParams();
+  let customProvider = useCustomProvider(instance.data?.id, customProviderId);
+
+  return renderWithLoader({ customProvider })(({ customProvider }) => (
+    <DetailsTableLayout title="Versions" description="Every published version of this provider.">
+      <CustomProviderVersionsTable customProvider={customProvider.data} />
+
+      <RouterPanel param="version_id" width={1000}>
+        {versionId => (
+          <>
+            <Panel.Header>
+              <Panel.Title>Version Details</Panel.Title>
+            </Panel.Header>
+
+            <Panel.Content>
+              <div>
+                <CustomProviderVersion
+                  versionId={versionId}
+                  customProvider={customProvider.data}
+                />
+              </div>
+            </Panel.Content>
+          </>
+        )}
+      </RouterPanel>
+    </DetailsTableLayout>
+  ));
+};

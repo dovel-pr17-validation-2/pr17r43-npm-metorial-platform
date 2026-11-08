@@ -1,0 +1,90 @@
+import { db, ID } from '@metorial/db';
+import { dispatchSystemEventDelivery } from '@metorial/module-event-delivery';
+import type { PresenterContext } from '@metorial/presenter';
+import { createQueue } from '@metorial/queue';
+import { randomBigInt } from '../lib/oid';
+
+let eventPresenterContext: PresenterContext = {
+  apiVersion: 'mt_2026_01_01_magnetar',
+  accessType: 'event_system'
+};
+
+export interface SystemEventIngestJob {
+  id: string;
+  source: 'resource';
+  eventType: string;
+  organizationId: string;
+  instanceId: string | null;
+  payload: Record<string, any>;
+}
+
+export let systemEventIngestQueue = createQueue<SystemEventIngestJob>({
+  name: 'auditing/event/ingest',
+  workerOpts: { concurrency: 50 }
+});
+
+export let enqueueSystemEvent = async (d: {
+  eventType: string;
+  organizationId: string;
+  instanceId?: string | null;
+  payload: Record<string, any>;
+}) => {
+  let id = await ID.generateId('systemEvent');
+
+  await systemEventIngestQueue.add(
+    {
+      id,
+      source: 'resource',
+      eventType: d.eventType,
+      organizationId: d.organizationId,
+      instanceId: d.instanceId ?? null,
+      payload: d.payload
+    },
+    { id }
+  );
+};
+
+export let systemEventIngestQueueProcessor = systemEventIngestQueue.process(async data => {
+  // The event schema imports @metorial/presenters, which (through module services) imports this
+  // module, so loading it eagerly creates an initialization cycle.
+  let { webhookEvents } = await import('@metorial/webhook-event-schema');
+  let definition = (webhookEvents as any)[data.eventType];
+  if (!definition) return;
+
+  let [organization, instance] = await Promise.all([
+    db.organization.findUniqueOrThrow({
+      where: { id: data.organizationId },
+      select: { oid: true }
+    }),
+    data.instanceId
+      ? db.instance.findUniqueOrThrow({
+          where: { id: data.instanceId },
+          select: { oid: true }
+        })
+      : Promise.resolve(null)
+  ]);
+
+  let presentedPayload = await definition.presenter
+    .present(data.payload)(eventPresenterContext)
+    .run();
+
+  let oid = randomBigInt();
+
+  let newEvent = await db.systemEvent.upsert({
+    where: { id: data.id },
+    create: {
+      oid,
+      id: data.id,
+      source: 'resource',
+      eventType: data.eventType,
+      organizationOid: organization.oid,
+      instanceOid: instance?.oid ?? null,
+      payloadJson: presentedPayload
+    },
+    update: {}
+  });
+
+  if (newEvent.oid === oid) {
+    await dispatchSystemEventDelivery({ systemEventId: data.id });
+  }
+});

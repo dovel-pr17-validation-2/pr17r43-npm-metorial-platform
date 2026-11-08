@@ -1,0 +1,50 @@
+model Team {
+  oid BigInt @id @default(autoincrement())
+  id  String @unique
+
+  slug        String
+  name        String
+  description String?
+
+  organizationOid BigInt
+  organization    Organization @relation(fields: [organizationOid], references: [oid], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  members  TeamMember[]
+  projects TeamProject[]
+  policies AccessPolicyAssignment[]
+}
+
+model TeamProject {
+  oid BigInt @id @default(autoincrement())
+  id  String @unique
+
+  teamOid BigInt
+  team    Team   @relation(fields: [teamOid], references: [oid], onDelete: Cascade)
+
+  projectOid BigInt
+  project    Project @relation(fields: [projectOid], references: [oid], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@unique([teamOid, projectOid])
+}
+
+model TeamMember {
+  oid BigInt @id @default(autoincrement())
+  id  String @unique
+
+  teamOid BigInt
+  team    Team   @relation(fields: [teamOid], references: [oid], onDelete: Cascade)
+
+  organizationActorOid BigInt
+  organizationActor    OrganizationActor @relation(fields: [organizationActorOid], references: [oid], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@unique([teamOid, organizationActorOid])
+}

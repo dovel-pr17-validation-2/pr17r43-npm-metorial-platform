@@ -1,0 +1,507 @@
+import { canonicalize } from '@lowerdeck/canonicalize';
+import {
+  internalServerError,
+  isServiceError,
+  ServiceError,
+  timeoutError
+} from '@lowerdeck/error';
+import {
+  createEd25519RpcSignatureHeader,
+  createRpcSignatureHeader,
+  rpcSignatureDigest,
+  rpcSignatureHeader
+} from '@lowerdeck/rpc-signature';
+import { getSentry, markSentryCaptured } from '@lowerdeck/sentry';
+import { serialize } from '@lowerdeck/serialize';
+import type { Call, Requester } from './shared/requester';
+import { generateRequestId } from './shared/requester';
+
+// @ts-ignore
+let isServer = typeof (globalThis as any).window === 'undefined';
+
+let verbose =
+  typeof (globalThis as any).window != 'undefined' ||
+  (typeof process !== 'undefined' && process.env.NODE_ENV !== 'production');
+
+let log = (...args: any[]) => {
+  if (!isServer) console.log(...args);
+};
+
+let Sentry = getSentry();
+
+let serverRetryTimeoutMs = 2 * 60 * 1000;
+let serverRetryDelayMaxMs = 1000;
+
+let calls: {
+  [key: string]: {
+    calls: {
+      call: Call;
+      resolve: (value: any) => void;
+      reject: (error: any) => void;
+    }[];
+    to: any;
+  };
+} = {};
+
+let decodeResponseBody = (body: string) => {
+  let parsed = JSON.parse(body);
+
+  if (
+    parsed &&
+    typeof parsed == 'object' &&
+    Object.keys(parsed).length == 1 &&
+    typeof parsed.$$TYPES$$ == 'object' &&
+    parsed.$$TYPES$$?.__mode == 'object'
+  ) {
+    return null;
+  }
+
+  return serialize.decode(parsed);
+};
+
+class InvalidRpcResponseError extends Error {
+  constructor(
+    cause: unknown,
+    readonly httpStatus: number
+  ) {
+    super('Invalid RPC response', { cause });
+    this.name = 'InvalidRpcResponseError';
+  }
+}
+
+interface RpcRequestDiagnostic {
+  error: Error;
+  httpStatus?: number;
+}
+
+let rpcRequestDiagnostics = new WeakMap<object, RpcRequestDiagnostic>();
+
+let reportedRequestDiagnostics = new WeakMap<
+  object,
+  {
+    error: Error;
+    httpStatus?: number;
+    endpoint: string;
+    rpcMethod: string;
+    timeoutMs?: number;
+    elapsedMs: number;
+    attempts: number;
+  }
+>();
+
+export let getRpcRequestDiagnostics = (error: unknown) =>
+  error instanceof Error ? reportedRequestDiagnostics.get(error) : undefined;
+
+class RpcRequestError extends ServiceError<any> {
+  constructor(
+    error: ReturnType<typeof internalServerError> | ReturnType<typeof timeoutError>,
+    diagnostic: RpcRequestDiagnostic
+  ) {
+    super(error);
+    this.name = 'RpcRequestError';
+    rpcRequestDiagnostics.set(this, diagnostic);
+  }
+}
+
+class RpcTransportError extends RpcRequestError {}
+
+class RpcResponseError extends RpcRequestError {}
+
+let decodeRpcResponse = (body: string, httpStatus: number) => {
+  try {
+    return decodeResponseBody(body);
+  } catch (error) {
+    throw new InvalidRpcResponseError(error, httpStatus);
+  }
+};
+
+let toRequestError = (call: Call, error: unknown) => {
+  let cause = error instanceof Error ? error : undefined;
+  let timedOut =
+    (error instanceof Error && error.name === 'AbortError') || call.signal?.aborted;
+
+  if (timedOut) {
+    let diagnostic = new Error(`Request timed out: ${call.name} on ${call.endpoint}`, {
+      cause
+    });
+    diagnostic.name = 'RpcTimeoutError';
+    return new RpcTransportError(timeoutError(), { error: diagnostic });
+  }
+
+  if (error instanceof InvalidRpcResponseError) {
+    let httpStatus = error.httpStatus;
+
+    // RPC servers always answer with an RPC body, so an undecodable 5xx was produced by a load
+    // balancer or proxy in front of the server (no healthy target, restart, deploy). That is
+    // as transient as a refused connection and gets the same deadline-bound retries.
+    if (httpStatus >= 500) {
+      let diagnostic = new Error(
+        `Upstream unavailable: ${call.endpoint} answered HTTP ${httpStatus} for ${call.name}`,
+        { cause }
+      );
+      diagnostic.name = 'RpcUpstreamUnavailableError';
+      return new RpcTransportError(internalServerError(), { error: diagnostic, httpStatus });
+    }
+
+    let diagnostic = new Error(
+      `Invalid response from server ${call.endpoint} for ${call.name}`,
+      { cause }
+    );
+    diagnostic.name = 'RpcInvalidResponseError';
+    return new RpcResponseError(internalServerError(), { error: diagnostic, httpStatus });
+  }
+
+  let diagnostic = new Error(`Unable to reach server ${call.endpoint} for ${call.name}`, {
+    cause
+  });
+  diagnostic.name = 'RpcUnreachableError';
+  return new RpcTransportError(internalServerError(), { error: diagnostic });
+};
+
+let createBatchUrl = (call: Call) => {
+  let url = new URL(call.endpoint);
+  url.search = new URLSearchParams(call.query).toString();
+  return url;
+};
+
+let createSingleUrl = (call: Call) => {
+  let url = createBatchUrl(call);
+  if (!url.pathname.endsWith('/')) url.pathname += '/';
+  url.pathname += call.name.replace(/:/g, '.');
+  return url;
+};
+
+let createBatchBody = (
+  c: {
+    call: Call;
+    resolve: (value: any) => void;
+    reject: (error: any) => void;
+  }[]
+) =>
+  serialize.encode({
+    calls: c
+      .map(x => ({
+        id: x.call.id,
+        name: x.call.name,
+        payload: x.call.payload
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name))
+  });
+
+let runCalls = async (
+  call: Call,
+  c: {
+    call: Call;
+    resolve: (value: any) => void;
+    reject: (error: any) => void;
+  }[]
+) => {
+  let isSingle = c.length == 1 && c[0]!.call.useDirectMethodRoute;
+  let url = isSingle ? createSingleUrl(c[0]!.call) : createBatchUrl(call);
+  let body = isSingle ? serialize.encode(c[0]!.call.payload) : createBatchBody(c);
+
+  let headers: Record<string, string> = {
+    'Content-Type': 'application/rpc+json',
+    ...c[0]!.call.headers
+  };
+
+  if (call.signature) {
+    headers[rpcSignatureHeader] =
+      typeof call.signature == 'object' && 'algorithm' in call.signature
+        ? await createEd25519RpcSignatureHeader({
+            ...call.signature,
+            authorization: new Headers(headers).get('authorization') ?? '',
+            method: 'POST',
+            url,
+            body
+          })
+        : await createRpcSignatureHeader({
+            token: typeof call.signature == 'string' ? call.signature : call.signature.secret,
+            timestamp: Date.now(),
+            method: 'POST',
+            url,
+            body
+          });
+  }
+
+  fetch(url.toString(), {
+    method: 'POST',
+    headers,
+    body,
+    credentials: 'include',
+    referrerPolicy: c[0]!.call.referrerPolicy,
+    signal: c[0]!.call.signal,
+
+    // @ts-ignore
+    keepalive: false
+  })
+    .then(async res => ({
+      res: decodeRpcResponse(await res.text(), res.status),
+      headers: res.headers,
+      status: res.status
+    }))
+    .then(({ res, headers, status }) => {
+      if (isSingle) {
+        if (status >= 200 && status < 300) {
+          c[0]!.resolve({
+            data: res,
+            status,
+            headers
+          });
+          return;
+        }
+
+        c[0]!.reject(ServiceError.fromResponse(res));
+        return;
+      }
+
+      if (res.__typename == 'error' || (res.object == 'error' && res.ok === false)) {
+        let err = ServiceError.fromResponse(res);
+        c.forEach(x => x.reject(err));
+        return;
+      }
+
+      for (let call of c) {
+        let callRes = res.calls.find((x: any) => x.id == call.call.id);
+        if (!callRes) {
+          let err = new ServiceError(internalServerError({ message: 'Call not returned' }));
+          call.reject(err);
+          return;
+        }
+
+        if (callRes.status >= 200 && callRes.status < 300) {
+          call.resolve({
+            data: callRes.result,
+            status: callRes.status,
+            headers
+          });
+          continue;
+        }
+
+        let err = ServiceError.fromResponse(callRes.result);
+        call.reject(err);
+      }
+    })
+    .catch(e => {
+      if (verbose) {
+        console.error(e);
+      }
+
+      c.forEach(x => x.reject(toRequestError(x.call, e)));
+    });
+};
+
+let performRequest = async (call: Call) => {
+  if (call.disableBatching || call.signal) {
+    return new Promise((resolve, reject) => {
+      runCalls(call, [{ call, resolve, reject }]).catch(reject);
+    });
+  }
+
+  if (isServer) {
+    return new Promise((resolve, reject) => {
+      runCalls(call, [{ call, resolve, reject }]).catch(reject);
+    });
+  }
+
+  let key = `${canonicalize(call.headers)}${canonicalize(call.query)}${call.endpoint}${canonicalize(call.referrerPolicy ?? null)}${await rpcSignatureDigest(canonicalize(call.signature ?? null))}`;
+
+  if (!calls[key]) calls[key] = { calls: [], to: null };
+  let current = calls[key]!;
+
+  let promise = new Promise((resolve, reject) => {
+    current.calls.push({ call, resolve, reject });
+  });
+
+  if (current.to) clearTimeout(current.to);
+
+  current.to = setTimeout(() => {
+    let c = calls[key]!.calls;
+    calls[key]!.calls = [];
+    calls[key]!.to = null;
+
+    runCalls(call, c).catch(e => c.forEach(x => x.reject(e)));
+  }, 10);
+
+  return promise;
+};
+
+let abortedError = () => new ServiceError(timeoutError());
+
+let abortableDelay = (ms: number, signal: AbortSignal) =>
+  new Promise<void>(resolve => {
+    if (signal.aborted) return resolve();
+
+    let onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    let timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+
+let createDeadlineSignal = (call: { timeoutMs?: number; signal?: AbortSignal }) => {
+  let timeoutMs = call.timeoutMs ?? (isServer ? serverRetryTimeoutMs : undefined);
+  if (timeoutMs == null && !call.signal) return { signal: undefined, release: () => {} };
+
+  let controller = new AbortController();
+  let onExternalAbort = () => controller.abort();
+  let timer = timeoutMs == null ? null : setTimeout(() => controller.abort(), timeoutMs);
+
+  if (call.signal) {
+    if (call.signal.aborted) controller.abort();
+    else call.signal.addEventListener('abort', onExternalAbort, { once: true });
+  }
+
+  return {
+    signal: controller.signal,
+    release: () => {
+      if (timer) clearTimeout(timer);
+      call.signal?.removeEventListener('abort', onExternalAbort);
+    }
+  };
+};
+
+let requesterInternal = async (
+  call: Parameters<Requester>[0],
+  diagnostics: { attempts: number }
+) => {
+  let id = generateRequestId();
+  log(`[call:${call.name.replace(':', '-')}:${id}] Queued`);
+
+  let tries = 0;
+  let boundedRetryFailures = 0;
+  let error: Error | null = null;
+
+  for (let header in call.headers) {
+    if (call.headers[header] === undefined) delete call.headers[header];
+  }
+
+  if (call.query) {
+    for (let query in call.query) {
+      if (call.query[query] === undefined) delete call.query[query];
+    }
+  }
+
+  let maxBoundedTries = typeof (globalThis as any).window === 'undefined' ? 6 : 3;
+  let retryDelay = typeof (globalThis as any).window === 'undefined' ? 20 : 1000;
+
+  let deadline = createDeadlineSignal(call);
+
+  try {
+    while (true) {
+      if (deadline.signal?.aborted) throw error ?? abortedError();
+
+      try {
+        diagnostics.attempts += 1;
+        return (await performRequest({
+          ...(call as any),
+          id,
+          signal: deadline.signal
+        }).then(
+          res => {
+            if (!isServer && call.logResponses !== false) {
+              log(`[call:${call.name.replace(':', '-')}:${id}] Success`, res);
+            }
+
+            return res;
+          },
+          err => {
+            if (isServer) {
+              log(`[call:${call.name.replace(':', '-')}:${id}] Queued`);
+            }
+
+            log(`[call:${call.name.replace(':', '-')}:${id}] Error`, err);
+
+            throw err;
+          }
+        )) as any;
+      } catch (e: any) {
+        error = e;
+
+        if (deadline.signal?.aborted) throw error ?? abortedError();
+        if (call.retry === false) throw e;
+
+        if (isServiceError(e)) {
+          // 400 errors are not retried
+          if (e.data.status < 500) throw e;
+        }
+
+        if (!isServer || !(e instanceof RpcTransportError)) {
+          boundedRetryFailures += 1;
+          if (boundedRetryFailures >= maxBoundedTries) throw e;
+        }
+      }
+
+      tries += 1;
+      let delay = Math.min(tries * retryDelay, serverRetryDelayMaxMs);
+      if (deadline.signal) {
+        await abortableDelay(delay, deadline.signal);
+        if (deadline.signal.aborted) throw error ?? abortedError();
+      } else {
+        await new Promise(r => setTimeout(r, delay));
+      }
+    }
+  } finally {
+    deadline.release();
+  }
+
+  if (error) throw error;
+
+  throw new ServiceError(internalServerError());
+};
+
+let offlineResponderKey = Symbol.for('lowerdeck.offline.rpc');
+
+export let request: Requester = async call => {
+  let offlineResponder = (globalThis as any)[offlineResponderKey] as Requester | undefined;
+  if (offlineResponder) return offlineResponder(call);
+
+  let startedAt = Date.now();
+  let diagnostics = { attempts: 0 };
+  try {
+    return await requesterInternal(call, diagnostics);
+  } catch (error) {
+    if (!(error instanceof RpcRequestError)) throw error;
+
+    let diagnostic = rpcRequestDiagnostics.get(error)!;
+    let details = {
+      error: diagnostic.error,
+      httpStatus: diagnostic.httpStatus,
+      endpoint: call.endpoint,
+      rpcMethod: call.name,
+      timeoutMs: call.timeoutMs ?? (isServer ? serverRetryTimeoutMs : undefined),
+      elapsedMs: Date.now() - startedAt,
+      attempts: diagnostics.attempts
+    };
+
+    let publicError = new ServiceError(
+      error.data.status == 504 ? timeoutError() : internalServerError()
+    );
+    reportedRequestDiagnostics.set(publicError, details);
+
+    let isBrowserNetworkFailure = !isServer && diagnostic.error.name === 'RpcUnreachableError';
+    if (isBrowserNetworkFailure) {
+      markSentryCaptured(publicError);
+    } else if (call.captureErrors !== false && !call.signal?.aborted) {
+      Sentry.captureException(details.error, {
+        tags: { rpcMethod: call.name },
+        fingerprint: ['rpc-request-error', details.error.name, call.endpoint],
+        extra: {
+          endpoint: call.endpoint,
+          httpStatus: details.httpStatus,
+          timeoutMs: details.timeoutMs,
+          elapsedMs: details.elapsedMs,
+          attempts: diagnostics.attempts
+        }
+      });
+      markSentryCaptured(publicError);
+    }
+
+    throw publicError;
+  }
+};

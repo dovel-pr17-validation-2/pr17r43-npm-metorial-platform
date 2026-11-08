@@ -1,0 +1,95 @@
+name: Resolve reusable image
+description: Fingerprint actual Docker inputs and find an existing GHCR image
+inputs:
+  dockerfile:
+    required: true
+  image:
+    required: true
+  canonical:
+    default: ''
+  workspace:
+    default: .
+  descriptor-cache:
+    default: 'true'
+  lookup:
+    default: 'true'
+  anonymous:
+    default: 'false'
+  publish:
+    default: 'false'
+  build-arguments:
+    default: '{}'
+outputs:
+  prepared:
+    value: ${{ steps.resolve.outputs.prepared }}
+  context:
+    value: ${{ steps.resolve.outputs.context }}
+  hit:
+    value: ${{ steps.resolve.outputs.hit }}
+  source:
+    value: ${{ steps.resolve.outputs.source }}
+  tag:
+    value: ${{ steps.resolve.outputs.tag }}
+  dockerfile:
+    value: ${{ steps.resolve.outputs.dockerfile }}
+runs:
+  using: composite
+  steps:
+    - uses: oven-sh/setup-bun@v2
+      with:
+        bun-version: '1.4.2'
+    - name: Install registry client
+      shell: bash
+      run: |
+        set -euo pipefail
+        directory="$RUNNER_TEMP/regctl"
+        mkdir -p "$directory"
+        curl --fail --retry 3 -L https://github.com/regclient/regclient/releases/download/v0.11.6/regctl-linux-amd64 -o "$directory/regctl"
+        echo "8e0e62a497fcdb8048d18aa927a139613176ba0531f412bc541044e28f9856bd  $directory/regctl" | sha256sum -c -
+        chmod +x "$directory/regctl"
+        echo "$directory" >> "$GITHUB_PATH"
+    - id: metadata
+      shell: bash
+      env:
+        WORKSPACE: ${{ inputs.workspace }}
+        DOCKERFILE: ${{ inputs.dockerfile }}
+        BUILD_ARGUMENTS: ${{ inputs.build-arguments }}
+      run: |
+        set -euo pipefail
+        dockerfile="$(realpath "$DOCKERFILE")"
+        cd "$WORKSPACE"
+        tooling=src/tooling/docker-build/image-metadata.ts
+        if [ -f oss/package.json ]; then tooling="oss/$tooling"; fi
+        bun "$tooling" "$dockerfile" "$BUILD_ARGUMENTS"
+    - id: restore-metadata
+      if: steps.metadata.outputs.pruned == 'true' && inputs.descriptor-cache == 'true'
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ steps.metadata.outputs.cache }}
+        key: ${{ steps.metadata.outputs.key }}
+    - id: resolve
+      shell: bash
+      env:
+        IMAGE_METADATA_CACHE_HIT: ${{ steps.restore-metadata.outputs.cache-hit }}
+        DOCKER_BUILD_CACHE_DIRECTORY: ${{ steps.metadata.outputs.cache }}
+        IMAGE_CACHE_ANONYMOUS: ${{ inputs.anonymous }}
+        IMAGE_CACHE_PUBLISH: ${{ inputs.publish }}
+        IMAGE_CACHE_LOOKUP: ${{ inputs.lookup }}
+        WORKSPACE: ${{ inputs.workspace }}
+        DOCKERFILE: ${{ inputs.dockerfile }}
+        IMAGE: ${{ inputs.image }}
+        CANONICAL: ${{ inputs.canonical }}
+        BUILD_ARGUMENTS: ${{ inputs.build-arguments }}
+      run: |
+        set -euo pipefail
+        dockerfile="$(realpath "$DOCKERFILE")"
+        cd "$WORKSPACE"
+        tooling=src/tooling/docker-build/image-cache.ts
+        if [ -f oss/package.json ]; then tooling="oss/$tooling"; fi
+        bun "$tooling" resolve "$dockerfile" "$IMAGE" "$CANONICAL" "$BUILD_ARGUMENTS"
+    - name: Save build graph metadata
+      if: steps.metadata.outputs.pruned == 'true' && inputs.descriptor-cache == 'true' && steps.restore-metadata.outputs.cache-hit != 'true' && inputs.publish == 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ steps.metadata.outputs.cache }}
+        key: ${{ steps.metadata.outputs.key }}

@@ -1,0 +1,110 @@
+import { badRequestError, ServiceError } from '@lowerdeck/error';
+import { Paginator } from '@lowerdeck/pagination';
+import { v } from '@lowerdeck/validation';
+import { providerSpecificationService } from '@metorial-subspace/module-catalog';
+import { Controller } from '@metorial/rest';
+import { dateFilterValidator } from '../../../lib/dateFilter';
+import { normalizeArrayParam } from '../../../lib/normalizeArrayParam';
+import { checkAccess } from '../../../middleware/checkAccess';
+import { integrationsGroup, instancePath } from '../../../middleware/instanceGroup';
+import { providerSpecificationPresenter } from '@metorial/presenters';
+
+let providerSpecificationGroup = integrationsGroup.use(async ctx => {
+  if (!ctx.params.providerSpecificationId) {
+    throw new ServiceError(
+      badRequestError({
+        message: 'providerSpecificationId is required',
+        description: 'The providerSpecificationId path parameter is required.'
+      })
+    );
+  }
+
+  let specification = await providerSpecificationService.getProviderSpecificationById({
+    instance: ctx.instance,
+    providerSpecificationId: ctx.params.providerSpecificationId
+  });
+
+  return { specification };
+});
+
+export let providerSpecificationController = Controller.create(
+  {
+    name: 'Provider Specifications',
+    description:
+      'A specification defines what a provider version can do: its tools, auth methods, and required configuration fields.'
+  },
+  {
+    list: integrationsGroup
+      .get(instancePath('provider-specifications', 'providers.specifications.list'), {
+        name: 'List provider specifications',
+        description: 'Returns a paginated list of provider specifications.'
+      })
+      .use(checkAccess({ possibleScopes: ['instance.provider.specification:read'] }))
+      .outputList(providerSpecificationPresenter)
+      .query(
+        'default',
+        Paginator.validate(
+          v.object({
+            id: v.optional(v.union([v.string(), v.array(v.string())]), {
+              description: 'Filter by specification ID(s)'
+            }),
+            provider_id: v.optional(v.union([v.string(), v.array(v.string())]), {
+              description: 'Filter by provider ID(s)'
+            }),
+            provider_version_id: v.optional(v.union([v.string(), v.array(v.string())]), {
+              description: 'Filter by provider version ID(s)'
+            }),
+            provider_deployment_id: v.optional(v.union([v.string(), v.array(v.string())]), {
+              description: 'Filter by provider deployment ID(s)'
+            }),
+            provider_config_id: v.optional(v.union([v.string(), v.array(v.string())]), {
+              description: 'Filter by provider config ID(s)'
+            }),
+            search: v.optional(v.string(), {
+              description: 'Match a provider specification by its exact ID'
+            }),
+            created_at: dateFilterValidator('provider specification creation time'),
+            updated_at: dateFilterValidator('provider specification last update time')
+          })
+        )
+      )
+      .do(async ctx => {
+        let paginator = await providerSpecificationService.listProviderSpecifications({
+          instance: ctx.instance,
+          ids: normalizeArrayParam(ctx.query.id),
+          providerIds: normalizeArrayParam(ctx.query.provider_id),
+          providerVersionIds: normalizeArrayParam(ctx.query.provider_version_id),
+          providerDeploymentIds: normalizeArrayParam(ctx.query.provider_deployment_id),
+          providerConfigIds: normalizeArrayParam(ctx.query.provider_config_id),
+          search: ctx.query.search,
+          createdAt: ctx.query.created_at,
+          updatedAt: ctx.query.updated_at
+        });
+
+        let list = await paginator.run(ctx.query);
+
+        return Paginator.present(list, specification =>
+          providerSpecificationPresenter.present({ specification })
+        );
+      }),
+
+    get: providerSpecificationGroup
+      .get(
+        instancePath(
+          'provider-specifications/:providerSpecificationId',
+          'providers.specifications.get'
+        ),
+        {
+          name: 'Get provider specification',
+          description: 'Retrieves a specific provider specification by ID.'
+        }
+      )
+      .use(checkAccess({ possibleScopes: ['instance.provider.specification:read'] }))
+      .output(providerSpecificationPresenter)
+      .do(async ctx => {
+        return providerSpecificationPresenter.present({
+          specification: ctx.specification
+        });
+      })
+  }
+);

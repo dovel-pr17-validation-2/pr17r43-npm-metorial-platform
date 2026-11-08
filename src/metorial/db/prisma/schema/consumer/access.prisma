@@ -1,0 +1,110 @@
+enum ConsumerAccessTargetType {
+  provider_template
+  magic_mcp_server
+  skill
+  skill_template
+  skill_group
+  skill_marketplace
+  skill_plugin
+}
+
+enum ConsumerAccessLevel {
+  read
+  manage
+}
+
+model ConsumerAccess {
+  oid BigInt @id @default(autoincrement())
+  id  String @unique
+
+  type        ConsumerAccessTargetType
+  accessLevel ConsumerAccessLevel?
+
+  surfaceOid BigInt
+  surface    ConsumerSurface @relation(fields: [surfaceOid], references: [oid], onDelete: Cascade)
+
+  consumerGroupOid BigInt
+  consumerGroup    ConsumerGroup @relation(fields: [consumerGroupOid], references: [oid], onDelete: Cascade)
+
+  providerTemplateOid BigInt?
+  providerTemplate    ProviderTemplate? @relation("ConsumerAccessProviderTemplate", fields: [providerTemplateOid], references: [oid], onDelete: Cascade)
+
+  magicMcpServerOid BigInt?
+  magicMcpServer    MagicMcpServer? @relation("ConsumerAccessMagicMcpServer", fields: [magicMcpServerOid], references: [oid], onDelete: Cascade)
+
+  skillOid BigInt?
+  skill    Skill?  @relation("ConsumerAccessSkill", fields: [skillOid], references: [oid], onDelete: Cascade)
+
+  skillTemplateOid BigInt?
+  skillTemplate    SkillTemplate? @relation("ConsumerAccessSkillTemplate", fields: [skillTemplateOid], references: [oid], onDelete: Cascade)
+
+  skillGroupOid BigInt?
+  skillGroup    SkillGroup? @relation("ConsumerAccessSkillGroup", fields: [skillGroupOid], references: [oid], onDelete: Cascade)
+
+  skillMarketplaceOid BigInt?
+  skillMarketplace    SkillMarketplace? @relation("ConsumerAccessSkillMarketplace", fields: [skillMarketplaceOid], references: [oid], onDelete: Cascade)
+
+  skillPluginOid BigInt?
+  skillPlugin    SkillPlugin? @relation("ConsumerAccessSkillPlugin", fields: [skillPluginOid], references: [oid], onDelete: Cascade)
+
+  listingOid BigInt?
+  listing    ConsumerAccessListing? @relation(fields: [listingOid], references: [oid], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@unique([consumerGroupOid, providerTemplateOid])
+  @@unique([consumerGroupOid, magicMcpServerOid])
+  @@unique([consumerGroupOid, skillOid])
+  @@unique([consumerGroupOid, skillTemplateOid])
+  @@unique([consumerGroupOid, skillGroupOid])
+  @@unique([consumerGroupOid, skillMarketplaceOid])
+  @@unique([consumerGroupOid, skillPluginOid])
+}
+
+model ConsumerAccessListing {
+  oid BigInt @id @default(autoincrement())
+  id  String @unique
+
+  name        String
+  description String?
+  readme      String?
+
+  surfaceOid BigInt
+  surface    ConsumerSurface @relation(fields: [surfaceOid], references: [oid], onDelete: Cascade)
+
+  providerTemplateOid BigInt?
+  providerTemplate    ProviderTemplate? @relation(fields: [providerTemplateOid], references: [oid], onDelete: Cascade)
+
+  magicMcpServerOid BigInt?
+  magicMcpServer    MagicMcpServer? @relation(fields: [magicMcpServerOid], references: [oid], onDelete: Cascade)
+
+  skillOid BigInt?
+  skill    Skill?  @relation(fields: [skillOid], references: [oid], onDelete: Cascade)
+
+  skillTemplateOid BigInt?
+  skillTemplate    SkillTemplate? @relation(fields: [skillTemplateOid], references: [oid], onDelete: Cascade)
+
+  skillGroupOid BigInt?
+  skillGroup    SkillGroup? @relation(fields: [skillGroupOid], references: [oid], onDelete: Cascade)
+
+  skillMarketplaceOid BigInt?
+  skillMarketplace    SkillMarketplace? @relation(fields: [skillMarketplaceOid], references: [oid], onDelete: Cascade)
+
+  skillPluginOid BigInt?
+  skillPlugin    SkillPlugin? @relation(fields: [skillPluginOid], references: [oid], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  consumerAccesses              ConsumerAccess[]
+  consumerSurfaceProviderGroups ConsumerSurfaceProviderGroupListing[]
+
+  @@unique([surfaceOid, providerTemplateOid])
+  @@unique([surfaceOid, magicMcpServerOid])
+  @@unique([surfaceOid, skillOid])
+  @@unique([surfaceOid, skillTemplateOid])
+  @@unique([surfaceOid, skillGroupOid])
+  @@unique([surfaceOid, skillMarketplaceOid])
+  @@unique([surfaceOid, skillPluginOid])
+}

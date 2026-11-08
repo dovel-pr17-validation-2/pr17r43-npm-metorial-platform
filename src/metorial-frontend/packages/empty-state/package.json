@@ -1,0 +1,16 @@
+{
+  "name": "@metorial/empty-state",
+  "version": "1.0.0",
+  "author": "Tobias Herber",
+  "license": "FSL-1.1",
+  "main": "src/index.tsx",
+  "dependencies": {
+    "@metorial/ui": "^1.0.0",
+    "react": "19.3.0",
+    "styled-components": "^6.6.0"
+  },
+  "devDependencies": {
+    "@metorial/tsconfig": "^1.0.0",
+    "typescript": "5.9.3"
+  }
+}

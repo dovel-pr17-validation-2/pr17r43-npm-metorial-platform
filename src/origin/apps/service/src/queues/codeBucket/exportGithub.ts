@@ -1,0 +1,54 @@
+import { createQueue } from '@lowerdeck/queue';
+import Long from 'long';
+import { db } from '../../db';
+import { env } from '../../env';
+import { codeBucketClient } from '../../lib/codeWorkspace';
+import { getInstallationAccessToken, getGitHubTransferEndpoints } from '../../lib/githubApp';
+import { codeBucketService } from '../../services/codeBucket';
+
+export let exportGithubQueue = createQueue<{
+  bucketId: string;
+  path: string;
+  repoId: string;
+  branchName?: string;
+  commitMessage?: string;
+  gitLfsThresholdBytes?: number;
+}>({
+  name: 'ori/exp/gh',
+  workerOpts: { concurrency: 50 },
+  redisUrl: env.service.REDIS_URL
+});
+
+export let exportGithubQueueProcessor = exportGithubQueue.process(async data => {
+  let repo = await db.scmRepository.findFirstOrThrow({
+    where: { id: data.repoId },
+    include: { installation: { include: { backend: true } } }
+  });
+  if (!repo.installation.externalInstallationId) {
+    throw new Error('Installation ID not found');
+  }
+
+  await codeBucketService.waitForCodeBucketReady({ codeBucketId: data.bucketId });
+
+  // Get a fresh installation access token
+  let token = await getInstallationAccessToken(
+    repo.installation.externalInstallationId,
+    repo.installation.backend
+  );
+
+  await codeBucketClient.exportBucketToGithub({
+    bucketId: data.bucketId,
+    ...getGitHubTransferEndpoints(
+      repo.installation.backend,
+      repo.externalOwner,
+      repo.externalName
+    ),
+    owner: repo.externalOwner,
+    repo: repo.externalName,
+    path: data.path,
+    token,
+    branch: data.branchName ?? repo.defaultBranch ?? 'main',
+    commitMessage: data.commitMessage ?? `Export code bucket ${data.bucketId}`,
+    lfsThresholdBytes: Long.fromNumber(data.gitLfsThresholdBytes ?? 0)
+  });
+});

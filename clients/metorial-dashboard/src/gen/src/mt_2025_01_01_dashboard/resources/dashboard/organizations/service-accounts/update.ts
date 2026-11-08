@@ -1,0 +1,61 @@
+import {
+  createMapper,
+  mapObject
+} from '@metorial/util-resource-mapper/compact';
+
+export type DashboardOrganizationsServiceAccountsUpdateOutput = {
+  object: 'machine_access.service_account';
+  id: string;
+  status: 'active' | 'archived';
+  subjectType: 'organization_member' | 'consumer';
+  name: string;
+  description: string | null;
+  scopes: { identifier: string; name: string; description: string }[];
+  clientId: string;
+  policies: {
+    object: 'management.access_policy#preview';
+    id: string;
+    type: 'everyone' | 'admin' | 'custom';
+    name: string;
+    slug: string;
+  }[];
+  clientSecrets: {
+    object: 'machine_access.oauth_application_client_secret';
+    id: string;
+    preview: string;
+    secret: string | null;
+    createdAt: Date;
+    deletedAt: Date | null;
+  }[];
+  organizationId: string;
+  portalId: string | null;
+  consumerProfileId: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+export let mapDashboardOrganizationsServiceAccountsUpdateOutput =
+  /* @__PURE__ */ mapObject<DashboardOrganizationsServiceAccountsUpdateOutput>(
+    [
+      'subject_type',
+      'client_id',
+      ['client_secrets', 1, [2, [1, ['created_at', 'deleted_at']]]],
+      'organization_id',
+      'portal_id',
+      'consumer_profile_id',
+      'created_at',
+      'updated_at'
+    ],
+    1
+  );
+
+export type DashboardOrganizationsServiceAccountsUpdateBody = {
+  name?: string | undefined;
+  description?: string | null | undefined;
+  scopes?: string[] | undefined;
+};
+
+export let mapDashboardOrganizationsServiceAccountsUpdateBody =
+  /* @__PURE__ */ createMapper<DashboardOrganizationsServiceAccountsUpdateBody>(
+    0
+  );

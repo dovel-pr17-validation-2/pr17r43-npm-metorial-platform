@@ -1,0 +1,19 @@
+{
+  "name": "@metorial/pages",
+  "version": "1.0.0",
+  "author": "Tobias Herber",
+  "license": "FSL-1.1",
+  "main": "src/index.ts",
+  "scripts": {},
+  "dependencies": {
+    "@metorial/ui": "workspace:*",
+    "react": "19.3.0",
+    "react-wrap-balancer": "^1.1.1",
+    "styled-components": "^6.6.0"
+  },
+  "devDependencies": {
+    "@metorial/tsconfig": "^1.0.0",
+    "typescript": "5.9.3",
+    "vitest": "^5.0.4"
+  }
+}

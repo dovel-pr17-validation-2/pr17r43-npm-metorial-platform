@@ -1,0 +1,178 @@
+import { integrationInstanceService } from '@metorial-subspace/module-integration';
+import { createCron } from '@metorial/cron';
+import { db } from '@metorial/db';
+import { combineQueueProcessors, createQueue, dailyPacedDelay } from '@metorial/queue';
+import { getConsumerOwnerForProfile, getConsumerOwnerForServer } from '../../lib/backing';
+import { resolveOwnerActorOid } from '../../lib/ownerActor';
+
+let OWNER_RECONCILE_BATCH_SIZE = 500;
+
+export let magicMcpServerOwnerReconcileCron = createCron(
+  {
+    name: 'magic/server/ownerActor/reconcile/cron',
+    cron: '0 * * * *'
+  },
+  async () => {
+    await reconcileMagicMcpServerOwnersManyQueue.add(
+      {},
+      { id: 'magic-server-owner-actor-reconcile' }
+    );
+  }
+);
+
+export let reconcileMagicMcpServerOwnersManyQueue = createQueue<{ cursor?: string }>({
+  name: 'magic/server/ownerActor/reconcile/many',
+  workerOpts: { concurrency: 1 }
+});
+
+export let reconcileMagicMcpServerOwnersManyQueueProcessor =
+  reconcileMagicMcpServerOwnersManyQueue.process(async data => {
+    let servers = await db.magicMcpServer.findMany({
+      where: {
+        ownerActorOid: null,
+        status: 'active',
+        id: data.cursor ? { gt: data.cursor } : undefined
+      },
+      orderBy: { id: 'asc' },
+      take: OWNER_RECONCILE_BATCH_SIZE,
+      select: { id: true }
+    });
+    if (!servers.length) return;
+
+    await reconcileMagicMcpServerOwnerQueue.addManyWithOps(
+      servers.map(server => ({
+        data: { magicMcpServerId: server.id },
+        opts: { id: server.id }
+      }))
+    );
+
+    if (servers.length === OWNER_RECONCILE_BATCH_SIZE) {
+      await reconcileMagicMcpServerOwnersManyQueue.add(
+        { cursor: servers[servers.length - 1]!.id },
+        dailyPacedDelay()
+      );
+    }
+  });
+
+export let reconcileMagicMcpServerOwnerQueue = createQueue<{ magicMcpServerId: string }>({
+  name: 'magic/server/ownerActor/reconcile/single',
+  workerOpts: { concurrency: 5, limiter: { max: 10, duration: 1000 } }
+});
+
+export let reconcileMagicMcpServerOwnerQueueProcessor =
+  reconcileMagicMcpServerOwnerQueue.process(async data => {
+    let server = await db.magicMcpServer.findUnique({
+      where: { id: data.magicMcpServerId },
+      include: { instance: true }
+    });
+    if (!server || server.ownerActorOid) return;
+
+    let consumerOwner = await getConsumerOwnerForServer({
+      instance: server.instance,
+      server
+    });
+    let ownerActorOid = await resolveOwnerActorOid(consumerOwner);
+
+    if (!ownerActorOid && server.subspaceIntegrationInstanceId) {
+      let integrationInstance = await integrationInstanceService
+        .getIntegrationInstanceById({
+          instance: server.instance,
+          integrationInstanceId: server.subspaceIntegrationInstanceId
+        })
+        .catch(() => null);
+
+      ownerActorOid = await resolveOwnerActorOid({
+        identityActorId: integrationInstance?.identityActor?.id
+      });
+    }
+
+    if (!ownerActorOid) return;
+
+    await db.magicMcpServer.updateMany({
+      where: { oid: server.oid, ownerActorOid: null },
+      data: { ownerActorOid }
+    });
+  });
+
+export let magicMcpEndpointOwnerReconcileCron = createCron(
+  {
+    name: 'magic/endpoint/ownerActor/reconcile/cron',
+    cron: '5 * * * *'
+  },
+  async () => {
+    await reconcileMagicMcpEndpointOwnersManyQueue.add(
+      {},
+      { id: 'magic-endpoint-owner-actor-reconcile' }
+    );
+  }
+);
+
+export let reconcileMagicMcpEndpointOwnersManyQueue = createQueue<{ cursor?: string }>({
+  name: 'magic/endpoint/ownerActor/reconcile/many',
+  workerOpts: { concurrency: 1 }
+});
+
+export let reconcileMagicMcpEndpointOwnersManyQueueProcessor =
+  reconcileMagicMcpEndpointOwnersManyQueue.process(async data => {
+    let endpoints = await db.magicMcpEndpoint.findMany({
+      where: {
+        ownerActorOid: null,
+        consumerProfileOid: { not: null },
+        id: data.cursor ? { gt: data.cursor } : undefined
+      },
+      orderBy: { id: 'asc' },
+      take: OWNER_RECONCILE_BATCH_SIZE,
+      select: { id: true }
+    });
+    if (!endpoints.length) return;
+
+    await reconcileMagicMcpEndpointOwnerQueue.addManyWithOps(
+      endpoints.map(endpoint => ({
+        data: { magicMcpEndpointId: endpoint.id },
+        opts: { id: endpoint.id }
+      }))
+    );
+
+    if (endpoints.length === OWNER_RECONCILE_BATCH_SIZE) {
+      await reconcileMagicMcpEndpointOwnersManyQueue.add(
+        { cursor: endpoints[endpoints.length - 1]!.id },
+        dailyPacedDelay()
+      );
+    }
+  });
+
+export let reconcileMagicMcpEndpointOwnerQueue = createQueue<{ magicMcpEndpointId: string }>({
+  name: 'magic/endpoint/ownerActor/reconcile/single',
+  workerOpts: { concurrency: 5, limiter: { max: 10, duration: 1000 } }
+});
+
+export let reconcileMagicMcpEndpointOwnerQueueProcessor =
+  reconcileMagicMcpEndpointOwnerQueue.process(async data => {
+    let endpoint = await db.magicMcpEndpoint.findUnique({
+      where: { id: data.magicMcpEndpointId },
+      include: { instance: true }
+    });
+    if (!endpoint || endpoint.ownerActorOid) return;
+
+    let ownerActorOid = await resolveOwnerActorOid(
+      await getConsumerOwnerForProfile({
+        instance: endpoint.instance,
+        consumerProfileOid: endpoint.consumerProfileOid
+      })
+    );
+    if (!ownerActorOid) return;
+
+    await db.magicMcpEndpoint.updateMany({
+      where: { oid: endpoint.oid, ownerActorOid: null },
+      data: { ownerActorOid }
+    });
+  });
+
+export let magicOwnerActorQueueProcessor = combineQueueProcessors([
+  magicMcpServerOwnerReconcileCron,
+  reconcileMagicMcpServerOwnersManyQueueProcessor,
+  reconcileMagicMcpServerOwnerQueueProcessor,
+  magicMcpEndpointOwnerReconcileCron,
+  reconcileMagicMcpEndpointOwnersManyQueueProcessor,
+  reconcileMagicMcpEndpointOwnerQueueProcessor
+]);

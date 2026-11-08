@@ -1,0 +1,462 @@
+import { hydrateResourceOwners } from '@metorial/module-resource-actor';
+import { badRequestError, ServiceError } from '@lowerdeck/error';
+import { Paginator } from '@lowerdeck/pagination';
+import { v, ValidationTypeValue } from '@lowerdeck/validation';
+import { sessionService } from '@metorial-subspace/module-session';
+import { Controller } from '@metorial/rest';
+import { resolveActorIdsForLogFilters, resolveSearchActorIds } from './_logFilterActors';
+import { dateFilterValidator } from '../../../lib/dateFilter';
+import { normalizeArrayParam } from '../../../lib/normalizeArrayParam';
+import {
+  authConfigValidator,
+  configValidator,
+  deploymentValidator
+} from '../../../lib/providerValidators';
+import { checkAccess } from '../../../middleware/checkAccess';
+import { requireNonPublishableMachineAccess } from '../../../middleware/requireNonPublishableMachineAccess';
+import {
+  constrainFineGrainedSessionQuery,
+  getFineGrainedAllowedSessionIds,
+  requireFineGrainedSessionParam
+} from '../../../middleware/checkFineGrainedSessionAccess';
+import { integrationsGroup, instancePath } from '../../../middleware/instanceGroup';
+import { providerSessionPresenter } from '@metorial/presenters';
+import { normalizeToolFilters, toolFiltersValidator } from './_shared';
+import {
+  resolveSessionProviderInput,
+  type SessionProviderAuthConfigSource,
+  type SessionProviderConfigSource,
+  type SessionProviderDeploymentSource
+} from './_providerInput';
+import { getOwnershipActor, resolveExplorerOwner } from '../../../lib/ownershipActor';
+
+let sessionGroup = integrationsGroup
+  .use(requireFineGrainedSessionParam('sessionId')())
+  .use(async ctx => {
+    if (!ctx.params.sessionId) {
+      throw new ServiceError(
+        badRequestError({
+          message: 'sessionId is required',
+          description: 'The sessionId path parameter is required.'
+        })
+      );
+    }
+
+    let session = await sessionService.getSessionById({
+      instance: ctx.instance,
+      organizationActor: getOwnershipActor(ctx),
+      sessionId: ctx.params.sessionId
+    });
+
+    return { session };
+  });
+
+let providerInput = v.intersection([
+  v.intersection([
+    v.intersection([deploymentValidator, configValidator]),
+    v.intersection([
+      authConfigValidator,
+      v.object({
+        session_template_id: v.optional(v.string())
+      })
+    ])
+  ]),
+  v.object({
+    tool_filters: toolFiltersValidator
+  })
+]);
+
+export let mapSessionConfigSource = (
+  config: ValidationTypeValue<typeof providerInput> | undefined
+): SessionProviderConfigSource | undefined => {
+  if (!config) return undefined;
+
+  if ('provider_config_id' in config && config.provider_config_id) {
+    return { type: 'reference', providerConfigId: config.provider_config_id };
+  }
+
+  if ('provider_config' in config && config.provider_config) {
+    let providerConfig = config.provider_config;
+
+    return {
+      type: 'ephemeral',
+      name: providerConfig.name,
+      config:
+        'value' in providerConfig
+          ? { type: 'inline', data: providerConfig.value }
+          : {
+              type: 'vault',
+              providerConfigVaultId: providerConfig.provider_config_vault_id
+            }
+    };
+  }
+};
+
+export let mapSessionDeploymentSource = (
+  deployment: ValidationTypeValue<typeof providerInput> | undefined
+): SessionProviderDeploymentSource | undefined => {
+  if (!deployment) return undefined;
+
+  if ('provider_deployment_id' in deployment && deployment.provider_deployment_id) {
+    return { type: 'reference', providerDeploymentId: deployment.provider_deployment_id };
+  }
+
+  if ('provider_deployment' in deployment && deployment.provider_deployment) {
+    let providerDeployment = deployment.provider_deployment;
+
+    return {
+      type: 'ephemeral',
+      providerId: providerDeployment.provider_id,
+      name: providerDeployment.name,
+      description: providerDeployment.description,
+      metadata: providerDeployment.metadata,
+      lockedProviderVersionId: providerDeployment.locked_provider_version_id
+    };
+  }
+};
+
+export let mapSessionAuthConfigSource = (
+  auth: ValidationTypeValue<typeof authConfigValidator> | undefined
+): SessionProviderAuthConfigSource | undefined => {
+  if (!auth) return undefined;
+
+  if ('provider_auth_config_id' in auth && auth.provider_auth_config_id) {
+    return { type: 'reference', providerAuthConfigId: auth.provider_auth_config_id };
+  }
+
+  if ('provider_auth_config' in auth && auth.provider_auth_config) {
+    let inner = auth.provider_auth_config;
+
+    return {
+      type: 'ephemeral',
+      name: inner.name,
+      providerAuthMethodId: inner.provider_auth_method_id,
+      providerId: inner.provider_id,
+      credentials: inner.credentials
+    };
+  }
+};
+
+export let sessionController = Controller.create(
+  {
+    name: 'Sessions',
+    description:
+      'Sessions are connections to providers that allow clients to interact with MCP servers. Each session can include one or more provider deployments.'
+  },
+  {
+    list: integrationsGroup
+      .get(instancePath('sessions', 'sessions.list'), {
+        name: 'List sessions',
+        description: 'Returns a paginated list of sessions.'
+      })
+      .use(requireNonPublishableMachineAccess())
+      .use(
+        checkAccess({
+          possibleScopes: ['instance.provider.session:read'],
+          fineGrainedPolicy: 'allow'
+        })
+      )
+      .use(constrainFineGrainedSessionQuery('session_id')())
+      .outputList(providerSessionPresenter)
+      .query(
+        'default',
+        Paginator.validate(
+          v.object({
+            status: v.optional(
+              v.union([
+                v.enumOf(['active', 'archived']),
+                v.array(v.enumOf(['active', 'archived']))
+              ]),
+              { description: 'Filter by status (active, archived)' }
+            ),
+            id: v.optional(v.union([v.string(), v.array(v.string())]), {
+              description: 'Filter by session ID(s)'
+            }),
+            agent_id: v.optional(v.union([v.string(), v.array(v.string())]), {
+              description: 'Filter by connected agent ID(s)'
+            }),
+            actor_id: v.optional(v.union([v.string(), v.array(v.string())]), {
+              description: 'Filter by connected identity actor ID(s)'
+            }),
+            consumer_id: v.optional(v.union([v.string(), v.array(v.string())]), {
+              description: 'Filter by connected consumer ID(s)'
+            }),
+            identity_id: v.optional(v.union([v.string(), v.array(v.string())]), {
+              description: 'Filter by connected identity ID(s)'
+            }),
+            session_template_id: v.optional(v.union([v.string(), v.array(v.string())]), {
+              description: 'Filter by session template ID(s)'
+            }),
+            session_provider_id: v.optional(v.union([v.string(), v.array(v.string())]), {
+              description: 'Filter by session provider ID(s)'
+            }),
+            provider_id: v.optional(v.union([v.string(), v.array(v.string())]), {
+              description: 'Filter by provider ID(s)'
+            }),
+            provider_deployment_id: v.optional(v.union([v.string(), v.array(v.string())]), {
+              description: 'Filter by provider deployment ID(s)'
+            }),
+            provider_config_id: v.optional(v.union([v.string(), v.array(v.string())]), {
+              description: 'Filter by provider config ID(s)'
+            }),
+            provider_auth_config_id: v.optional(v.union([v.string(), v.array(v.string())]), {
+              description: 'Filter by provider auth config ID(s)'
+            }),
+            created_at: dateFilterValidator('session creation time'),
+            updated_at: dateFilterValidator('session last update time'),
+            search: v.optional(
+              v.string({
+                description:
+                  'Search by session ID, or by the name of a related provider, auth method, deployment, config, auth config, agent, actor, identity, or consumer',
+                examples: ['github']
+              })
+            )
+          })
+        )
+      )
+      .do(async ctx => {
+        let actorIds = await resolveActorIdsForLogFilters({
+          instance: ctx.instance,
+          actorIds: normalizeArrayParam(ctx.query.actor_id),
+          consumerIds: normalizeArrayParam(ctx.query.consumer_id),
+          identityIds: normalizeArrayParam(ctx.query.identity_id)
+        });
+        let searchActorIds = await resolveSearchActorIds({
+          instance: ctx.instance,
+          search: ctx.query.search
+        });
+
+        let paginator = await sessionService.listSessions({
+          instance: ctx.instance,
+          organizationActor: getOwnershipActor(ctx),
+          accessTagSessionIds: getFineGrainedAllowedSessionIds(ctx),
+          allowDeleted: false,
+
+          status: normalizeArrayParam(ctx.query.status),
+          ids: normalizeArrayParam(ctx.query.id),
+          agentIds: normalizeArrayParam(ctx.query.agent_id),
+          actorIds,
+          sessionTemplateIds: normalizeArrayParam(ctx.query.session_template_id),
+          sessionProviderIds: normalizeArrayParam(ctx.query.session_provider_id),
+          providerIds: normalizeArrayParam(ctx.query.provider_id),
+          providerDeploymentIds: normalizeArrayParam(ctx.query.provider_deployment_id),
+          providerConfigIds: normalizeArrayParam(ctx.query.provider_config_id),
+          providerAuthConfigIds: normalizeArrayParam(ctx.query.provider_auth_config_id),
+          createdAt: ctx.query.created_at,
+          updatedAt: ctx.query.updated_at,
+          search: ctx.query.search,
+          searchActorIds
+        });
+
+        let list = await paginator.run(ctx.query);
+        let items = await sessionService.redactSessionsForCaller({
+          instance: ctx.instance,
+          organizationActor: getOwnershipActor(ctx),
+          sessions: list.items
+        });
+
+        return Paginator.present(await hydrateResourceOwners({ ...list, items }), session =>
+          providerSessionPresenter.present({
+            session
+          })
+        );
+      }),
+
+    get: sessionGroup
+      .get(instancePath('sessions/:sessionId', 'sessions.get'), {
+        name: 'Get session',
+        description: 'Retrieves a specific session by ID.'
+      })
+      .use(requireNonPublishableMachineAccess())
+      .use(
+        checkAccess({
+          possibleScopes: ['instance.provider.session:read'],
+          fineGrainedPolicy: 'allow'
+        })
+      )
+      .output(providerSessionPresenter)
+      .do(async ctx => {
+        let [session] = await sessionService.redactSessionsForCaller({
+          instance: ctx.instance,
+          organizationActor: getOwnershipActor(ctx),
+          sessions: [ctx.session]
+        });
+
+        return providerSessionPresenter.present(
+          await hydrateResourceOwners({
+            session: session!
+          })
+        );
+      }),
+
+    create: integrationsGroup
+      .post(instancePath('sessions', 'sessions.create'), {
+        name: 'Create session',
+        description: 'Creates a new session with provider deployments.'
+      })
+      .use(requireNonPublishableMachineAccess())
+      .use(checkAccess({ possibleScopes: ['instance.provider.session:write'] }))
+      .body(
+        'mt_2026_01_01_magnetar',
+        v.object({
+          name: v.optional(v.string()),
+          description: v.optional(v.string()),
+          metadata: v.optional(v.record(v.any())),
+          providers: v.array(providerInput)
+        }),
+        v => v
+      )
+      .body(
+        'default',
+        v.object({
+          name: v.optional(v.string()),
+          description: v.optional(v.string()),
+          metadata: v.optional(v.record(v.any())),
+          providers: v.array(providerInput),
+          source: v.optional(v.enumOf(['explorer']), {
+            description:
+              'Create an owner-locked resource visible only to the caller from the dashboard explorer.'
+          })
+        })
+      )
+      .output(providerSessionPresenter)
+      .do(async ctx => {
+        let ownerActorId = await resolveExplorerOwner(ctx, ctx.body.source);
+
+        let subspaceSession = await sessionService.createSession({
+          instance: ctx.instance,
+          auditScope: ctx.auditScope,
+          organizationActor: getOwnershipActor(ctx),
+          ownerActorId,
+          input: {
+            source: ctx.body.source,
+            isOwnerLocked: ctx.body.source === 'explorer' ? true : undefined,
+            isOwnerOnlyVisible: ctx.body.source === 'explorer' ? true : undefined,
+            name: ctx.body.name ?? `Session ${new Date().toISOString()}`,
+            description: ctx.body.description,
+            metadata: ctx.body.metadata,
+            providers: await Promise.all(
+              ctx.body.providers.map(p =>
+                resolveSessionProviderInput({
+                  instance: ctx.instance,
+                  auditScope: ctx.auditScope,
+                  ownerActorId,
+                  source: ctx.body.source,
+                  providerDeployment: mapSessionDeploymentSource(p),
+                  providerConfig: mapSessionConfigSource(p),
+                  providerAuthConfig: mapSessionAuthConfigSource(p),
+                  sessionTemplateId:
+                    'session_template_id' in p ? p.session_template_id : undefined,
+                  toolFilters:
+                    p.tool_filters === undefined
+                      ? undefined
+                      : normalizeToolFilters(p.tool_filters)
+                })
+              )
+            )
+          }
+        });
+
+        return providerSessionPresenter.present(
+          await hydrateResourceOwners({
+            session: subspaceSession
+          })
+        );
+      }),
+
+    update: sessionGroup
+      .patch(instancePath('sessions/:sessionId', 'sessions.update'), {
+        name: 'Update session',
+        description: 'Updates a session.'
+      })
+      .use(requireNonPublishableMachineAccess())
+      .use(
+        checkAccess({
+          possibleScopes: ['instance.provider.session:write'],
+          fineGrainedPolicy: 'allow'
+        })
+      )
+      .body(
+        'mt_2026_01_01_magnetar',
+        v.object({
+          name: v.optional(v.string({ examples: ['My updated session'] })),
+          description: v.optional(v.string({ examples: ['Updated session description'] })),
+          metadata: v.optional(v.record(v.any()), {
+            description: 'Custom key-value pairs for storing additional information'
+          })
+        }),
+        v => v
+      )
+      .body(
+        'default',
+        v.object({
+          name: v.optional(v.string({ examples: ['My updated session'] })),
+          description: v.optional(v.string({ examples: ['Updated session description'] })),
+          metadata: v.optional(v.record(v.any()), {
+            description: 'Custom key-value pairs for storing additional information'
+          }),
+          source: v.optional(v.enumOf(['explorer']), {
+            description:
+              'Mark this resource as originating from the dashboard explorer and enable its owner lock and owner-only visibility.'
+          })
+        })
+      )
+      .output(providerSessionPresenter)
+      .do(async ctx => {
+        let session = await sessionService.updateSession({
+          instance: ctx.instance,
+          auditScope: ctx.auditScope,
+          organizationActor: getOwnershipActor(ctx),
+          session: ctx.session,
+          input: {
+            name: ctx.body.name,
+            description: ctx.body.description,
+            metadata: ctx.body.metadata,
+            source: ctx.body.source,
+            isOwnerLocked: ctx.body.source === 'explorer' ? true : undefined,
+            isOwnerOnlyVisible: ctx.body.source === 'explorer' ? true : undefined
+          }
+        });
+
+        let [redactedSession] = await sessionService.redactSessionsForCaller({
+          instance: ctx.instance,
+          organizationActor: getOwnershipActor(ctx),
+          sessions: [session]
+        });
+
+        return providerSessionPresenter.present(
+          await hydrateResourceOwners({
+            session: redactedSession!
+          })
+        );
+      }),
+
+    delete: sessionGroup
+      .delete(instancePath('sessions/:sessionId', 'sessions.delete'), {
+        name: 'Delete session',
+        description: 'Deletes a session.'
+      })
+      .use(requireNonPublishableMachineAccess())
+      .use(
+        checkAccess({
+          possibleScopes: ['instance.provider.session:write'],
+          fineGrainedPolicy: 'allow'
+        })
+      )
+      .output(providerSessionPresenter)
+      .do(async ctx => {
+        let session = await sessionService.deleteSession({
+          instance: ctx.instance,
+          organizationActor: getOwnershipActor(ctx),
+          auditScope: ctx.auditScope,
+          session: ctx.session
+        });
+
+        return providerSessionPresenter.present(
+          await hydrateResourceOwners({
+            session
+          })
+        );
+      })
+  }
+);

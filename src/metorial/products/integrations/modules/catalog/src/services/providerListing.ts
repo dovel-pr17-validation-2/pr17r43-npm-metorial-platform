@@ -1,0 +1,385 @@
+import { notFoundError, ServiceError } from '@lowerdeck/error';
+import { Paginator } from '@lowerdeck/pagination';
+import { Service } from '@lowerdeck/service';
+import {
+  db,
+  type Environment,
+  type Prisma,
+  type Solution,
+  type Tenant
+} from '@metorial-subspace/db';
+import {
+  type DateFilter,
+  normalizeDateFilter,
+  resolveProviderCategories,
+  resolveProviderCollections,
+  resolveProviderGroups,
+  resolvePublishers
+} from '@metorial-subspace/list-utils';
+import { voyager, voyagerIndex, voyagerSource } from '@metorial-subspace/module-search';
+import {
+  getMetorialSolution,
+  type MetorialFacing,
+  resolveMetorialFacing
+} from '@metorial-subspace/module-tenant';
+import type { ProviderCapabilityFilter } from './provider';
+import {
+  getProviderCapabilityFilter,
+  getProviderEnvironmentVisibilityFilter,
+  getPublicRemoteProviderVisibilityFilter,
+  providerInclude
+} from './provider';
+
+export type ProviderListingOrderByUse =
+  | 'deployments'
+  | 'configs'
+  | 'authConfigs'
+  | 'credentials'
+  | 'sessions'
+  | 'sessionTemplates'
+  | 'lastUseAt'
+  | 'firstDeploymentAt'
+  | 'firstConfigAt'
+  | 'firstAuthConfigAt'
+  | 'firstCredentialAt'
+  | 'firstSessionAt'
+  | 'firstSessionTemplateAt'
+  | 'lastDeploymentAt'
+  | 'lastConfigAt'
+  | 'lastAuthConfigAt'
+  | 'lastCredentialAt'
+  | 'lastSessionAt'
+  | 'lastSessionTemplateAt';
+
+let getInclude = (tenant: Tenant | undefined, solution: Solution) => ({
+  categories: true,
+  collections: true,
+  groups: tenant
+    ? {
+        where: { tenantOid: tenant.oid, solutionOid: solution.oid }
+      }
+    : false,
+
+  publisher: true,
+
+  provider: {
+    include: providerInclude
+  }
+});
+
+let getTrustedListingFilter = (tenant?: Tenant) =>
+  tenant?.onlyAllowTrustedProviders
+    ? {
+        OR: [
+          { provider: { access: 'tenant' as const } },
+          { isVerified: true },
+          { isOfficial: true },
+          { isMetorial: true }
+        ]
+      }
+    : undefined!;
+
+type GetProviderListingByIdParams = {
+  providerListingId: string;
+  includeDeprecated?: boolean;
+  onlyActive?: boolean;
+};
+
+type ListProviderListingsParams = {
+  search?: string;
+
+  ids?: string[];
+  providerCollectionIds?: string[];
+  providerCategoryIds?: string[];
+  providerGroupIds?: string[];
+  publisherIds?: string[];
+
+  isPublic?: boolean;
+  onlyFromTenant?: boolean;
+
+  isVerified?: boolean;
+  isOfficial?: boolean;
+  isMetorial?: boolean;
+
+  createdAt?: DateFilter;
+  updatedAt?: DateFilter;
+
+  orderByRank?: boolean;
+  orderByUse?: ProviderListingOrderByUse;
+
+  capabilities?: ProviderCapabilityFilter;
+  adapterIdentifiers?: string[];
+  includeDeprecated?: boolean;
+};
+
+class ProviderListingService {
+  async getProviderListingById(d: MetorialFacing<GetProviderListingByIdParams>) {
+    let { instance, organizationActor, ...rest } = d;
+    let scope = await resolveMetorialFacing(d);
+
+    return this.getProviderListingByIdInternal({
+      ...rest,
+      tenant: scope.tenant,
+      environment: scope.environment
+    });
+  }
+
+  async getProviderListingByIdInternal(
+    d: {
+      tenant?: Tenant;
+      environment?: Environment;
+    } & GetProviderListingByIdParams
+  ) {
+    let solution = await getMetorialSolution();
+
+    let remoteVisibilityFilter = getPublicRemoteProviderVisibilityFilter(d);
+
+    let scopeFilters: Prisma.ProviderListingWhereInput[] = [
+      remoteVisibilityFilter ? { provider: remoteVisibilityFilter } : undefined!,
+      {
+        OR: [
+          { isPublic: true },
+          d.tenant && d.environment
+            ? {
+                ownerTenantOid: d.tenant.oid,
+                OR: [{ ownerSolutionOid: solution.oid }, { ownerSolutionOid: null }]
+              }
+            : undefined!
+        ].filter(Boolean)
+      },
+
+      d.environment
+        ? {
+            provider: getProviderEnvironmentVisibilityFilter(d)
+          }
+        : undefined!,
+
+      getTrustedListingFilter(d.tenant),
+
+      d.onlyActive ? { status: 'active' as const } : undefined!
+    ].filter(Boolean);
+
+    let findListingOid = async (match: Prisma.ProviderListingWhereInput) => {
+      let found = await db.providerListing.findFirst({
+        where: { AND: [match, ...scopeFilters] },
+        select: { oid: true }
+      });
+      return found?.oid;
+    };
+
+    let listingOid =
+      (await findListingOid({
+        OR: [
+          { id: d.providerListingId },
+          { slug: d.providerListingId },
+          { prettySlug: d.providerListingId }
+        ]
+      })) ?? (await findListingOid({ aliases: { has: d.providerListingId } }));
+
+    if (listingOid === undefined) {
+      let provider = await db.provider.findFirst({
+        where: {
+          OR: [{ id: d.providerListingId }, { globalIdentifier: d.providerListingId }]
+        },
+        select: { oid: true }
+      });
+
+      if (provider) listingOid = await findListingOid({ providerOid: provider.oid });
+    }
+
+    let providerListing =
+      listingOid === undefined
+        ? null
+        : await db.providerListing.findFirst({
+            where: { oid: listingOid },
+            include: getInclude(d.tenant, solution)
+          });
+    if (!providerListing) {
+      throw new ServiceError(notFoundError('provider.listing', d.providerListingId));
+    }
+
+    return providerListing;
+  }
+
+  async listProviderListings(d: MetorialFacing<ListProviderListingsParams>) {
+    let { instance, organizationActor, ...rest } = d;
+    let scope = await resolveMetorialFacing(d);
+
+    return this.listProviderListingsInternal({
+      ...rest,
+      tenant: scope.tenant,
+      environment: scope.environment
+    });
+  }
+
+  async listProviderListingsInternal(
+    d: {
+      tenant?: Tenant;
+      environment?: Environment;
+    } & ListProviderListingsParams
+  ) {
+    let solution = await getMetorialSolution();
+
+    let collections = await resolveProviderCollections(d.providerCollectionIds);
+    let categories = await resolveProviderCategories(d.providerCategoryIds);
+    let publishers = await resolvePublishers(d.publisherIds);
+    let includeDeprecated = d.includeDeprecated || !!d.ids?.length;
+
+    let capFilters = getProviderCapabilityFilter(d.capabilities || {});
+    let remoteVisibilityFilter = getPublicRemoteProviderVisibilityFilter(d);
+
+    let groups =
+      d.environment && d.tenant
+        ? await resolveProviderGroups(
+            { tenant: d.tenant, environment: d.environment, solution },
+            d.providerGroupIds
+          )
+        : undefined;
+
+    d.search = d.search?.trim();
+    if (!d.search?.length) d.search = undefined;
+
+    let orderByUse = d.orderByUse && d.tenant && d.environment ? d.orderByUse : undefined;
+
+    let useOrderMap: Map<bigint, number> | undefined;
+    if (orderByUse) {
+      let providerUses = await db.providerUse.findMany({
+        where: {
+          tenantOid: d.tenant!.oid,
+          solutionOid: solution.oid,
+          environmentOid: d.environment!.oid
+        },
+        orderBy: { [orderByUse]: 'desc' },
+        select: { providerOid: true },
+        take: 500
+      });
+
+      useOrderMap = new Map(providerUses.map((pu, i) => [pu.providerOid, i]));
+    }
+
+    return Paginator.create(({ prisma }) =>
+      prisma(async opts => {
+        let search = d.search
+          ? await voyager.record.search({
+              tenantId: d.tenant?.id,
+              sourceId: (await voyagerSource).id,
+              indexId: voyagerIndex.providerListing.id,
+              query: d.search
+            })
+          : null;
+
+        let listings = await db.providerListing.findMany({
+          ...opts,
+
+          orderBy: [
+            d.orderByRank || useOrderMap ? { rank: 'desc' as const } : undefined!,
+            ...opts.orderBy
+          ].filter(Boolean),
+
+          where: {
+            status: 'active',
+
+            AND: [
+              includeDeprecated ? undefined! : { isDeprecated: false },
+              remoteVisibilityFilter ? { provider: remoteVisibilityFilter } : undefined!,
+              {
+                OR: [
+                  { isPublic: true },
+                  d.tenant && d.environment
+                    ? {
+                        ownerTenantOid: d.tenant.oid,
+                        OR: [{ ownerSolutionOid: solution.oid }, { ownerSolutionOid: null }]
+                      }
+                    : undefined!
+                ].filter(Boolean)
+              },
+              d.environment
+                ? {
+                    provider: getProviderEnvironmentVisibilityFilter(d)
+                  }
+                : undefined!,
+
+              getTrustedListingFilter(d.tenant),
+
+              d.ids
+                ? {
+                    OR: [
+                      { id: { in: d.ids } },
+                      { slug: { in: d.ids } },
+                      { prettySlug: { in: d.ids } },
+                      { aliases: { hasSome: d.ids } },
+                      { provider: { id: { in: d.ids } } },
+                      { provider: { globalIdentifier: { in: d.ids } } }
+                    ]
+                  }
+                : undefined!,
+
+              search ? { id: { in: search.map(r => r.documentId) } } : undefined!,
+
+              collections ? { collections: { some: collections.oidIn } } : undefined!,
+              categories ? { categories: { some: categories.oidIn } } : undefined!,
+              groups ? { groups: { some: groups.oidIn } } : undefined!,
+
+              publishers ? { publisherOid: publishers.in } : undefined!,
+
+              capFilters ? { type: capFilters } : undefined!,
+
+              d.adapterIdentifiers?.length
+                ? {
+                    provider: {
+                      providerAdapters: {
+                        some: { global: { identifier: { in: d.adapterIdentifiers } } }
+                      }
+                    }
+                  }
+                : undefined!,
+
+              d.onlyFromTenant && d.tenant
+                ? {
+                    ownerTenantOid: d.tenant.oid,
+                    OR: [{ ownerSolutionOid: solution.oid }, { ownerSolutionOid: null }]
+                  }
+                : undefined!,
+
+              d.isPublic ? { isPublic: true } : undefined!,
+
+              d.isVerified !== undefined ? { isVerified: d.isVerified } : undefined!,
+              d.isOfficial !== undefined ? { isOfficial: d.isOfficial } : undefined!,
+              d.isMetorial !== undefined ? { isMetorial: d.isMetorial } : undefined!,
+              d.createdAt ? { createdAt: normalizeDateFilter(d.createdAt) } : undefined!,
+              d.updatedAt ? { updatedAt: normalizeDateFilter(d.updatedAt) } : undefined!
+            ].filter(Boolean)
+          },
+          include: getInclude(d.tenant, solution),
+          omit: {
+            readme: true
+          }
+        });
+
+        if (useOrderMap) {
+          listings.sort((a, b) => {
+            let aHasUse = useOrderMap.has(a.providerOid);
+            let bHasUse = useOrderMap.has(b.providerOid);
+
+            if (aHasUse && !bHasUse) return -1;
+            if (!aHasUse && bHasUse) return 1;
+
+            if (aHasUse && bHasUse) {
+              return useOrderMap.get(a.providerOid)! - useOrderMap.get(b.providerOid)!;
+            }
+
+            // Both without use — preserve rank desc order from DB
+            return 0;
+          });
+        }
+
+        return listings;
+      })
+    );
+  }
+}
+
+export let providerListingService = Service.create(
+  'providerListingService',
+  () => new ProviderListingService()
+).build();

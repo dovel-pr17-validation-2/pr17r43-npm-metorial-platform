@@ -1,0 +1,31 @@
+import { DashboardInstanceProviderDeploymentsConfigsCreateOutput } from '@metorial/dashboard-sdk';
+import { Dialog, showModal } from '@metorial/ui';
+import { ProviderConfigForm, ProviderConfigFormProps } from './form';
+
+export let showProviderConfigFormModal = (
+  p: ProviderConfigFormProps & {
+    onCreate?: (config: DashboardInstanceProviderDeploymentsConfigsCreateOutput) => void;
+    onBack?: () => void;
+  }
+) =>
+  showModal(({ dialogProps, close }) => (
+    <Dialog.Wrapper {...dialogProps} width={650}>
+      <Dialog.Title>Create Config</Dialog.Title>
+
+      <Dialog.Description>
+        {p.providerDeploymentId
+          ? 'Create a new configuration for this deployment.'
+          : 'Create a new configuration for this provider.'}
+      </Dialog.Description>
+
+      <ProviderConfigForm
+        {...p}
+        close={close}
+        onCreate={p.onCreate}
+        onBack={() => {
+          close();
+          p.onBack?.();
+        }}
+      />
+    </Dialog.Wrapper>
+  ));

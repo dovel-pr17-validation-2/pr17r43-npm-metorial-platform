@@ -1,0 +1,71 @@
+enum ConsumerSurfaceStatus {
+  active
+  archived
+  deleted
+}
+
+enum ConsumerSurfaceType {
+  portal
+  organization_members
+  cli
+}
+
+model ConsumerSurface {
+  oid BigInt @id @default(autoincrement())
+  id  String @unique
+
+  status ConsumerSurfaceStatus
+  type   ConsumerSurfaceType   @default(portal)
+
+  isInternal                      Boolean @default(false)
+  internalSurfaceUniqueIdentifier String?
+
+  name        String
+  description String?
+
+  sessionExpiryTimeInSeconds Int
+  emailWhitelist             String[] @default([])
+
+  allowConsumerSkillAuthoring  Boolean @default(true)
+  allowConsumerSkillPublishing Boolean @default(true)
+
+  skillConfigurationId String?
+
+  organizationOid BigInt
+  organization    Organization @relation(fields: [organizationOid], references: [oid], onDelete: Cascade)
+
+  instanceOid BigInt
+  instance    Instance @relation(fields: [instanceOid], references: [oid], onDelete: Cascade)
+
+  consumerAuthTenantOid BigInt?
+  consumerAuthTenant    ConsumerAuthTenant? @relation(fields: [consumerAuthTenantOid], references: [oid], onDelete: Cascade)
+
+  publishableApiKeyOid BigInt @unique
+  publishableApiKey    ApiKey @relation("ConsumerSurfacePublishableApiKey", fields: [publishableApiKeyOid], references: [oid], onDelete: Cascade)
+
+  managedEveryoneGroupOid BigInt?
+  managedEveryoneGroup    ConsumerGroup? @relation("PortalManagedEveryoneGroup", fields: [managedEveryoneGroupOid], references: [oid], onDelete: SetNull)
+
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @default(now()) @updatedAt
+  archivedAt DateTime?
+  deletedAt  DateTime?
+
+  consumerProfiles               ConsumerProfile[]
+  consumerInvites                ConsumerInvite[]
+  consumerGroups                 ConsumerGroup[]
+  consumerAccesses               ConsumerAccess[]
+  accessRequests                 ConsumerAccessRequest[]
+  authExchanges                  ConsumerAuthExchange[]
+  portal                         Portal?                         @relation("PortalSurface")
+  consumerAccessListings         ConsumerAccessListing[]
+  consumerSurfaceProviderGroups  ConsumerSurfaceProviderGroup[]
+  consumerClients                ConsumerClient[]
+  consumerAuthClients            ConsumerAuthClient[]
+  consumerSkills                 ConsumerSkill[]
+  consumerAuthClientSurfaces     ConsumerAuthClientSurface[]
+  consumerAuthTestAuthorizations ConsumerAuthTestAuthorization[]
+
+  @@unique([instanceOid, internalSurfaceUniqueIdentifier])
+  @@index([skillConfigurationId])
+}

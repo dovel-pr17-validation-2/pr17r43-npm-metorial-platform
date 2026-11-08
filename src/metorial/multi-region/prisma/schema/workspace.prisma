@@ -1,0 +1,255 @@
+enum WorkspaceType {
+  organization
+  portal
+  enterprise
+}
+
+enum WorkspaceStatus {
+  active
+  archived
+  deleted
+}
+
+model Workspace {
+  id String @id
+
+  type   WorkspaceType
+  status WorkspaceStatus
+
+  name String
+
+  accountId      String
+  portalId       String?
+  organizationId String?
+  enterpriseId   String?
+
+  ownerOid Int
+  owner    Cell @relation(fields: [ownerOid], references: [oid])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  profiles WorkspaceProfile[]
+  invites  WorkspaceInvite[]
+  groups   WorkspaceGroup[]
+  policies WorkspacePolicy[]
+}
+
+enum WorkspaceProfileStatus {
+  active
+  deleted
+}
+
+model WorkspaceProfile {
+  id String @id
+
+  status WorkspaceProfileStatus @default(active)
+
+  name  String
+  email String
+
+  accountId            String
+  userId               String?
+  organizationMemberId String?
+  consumerId           String?
+  consumerProfileId    String?
+  instanceConsumerId   String?
+  enterpriseMemberId   String?
+
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  globalProfileId String
+  globalProfile   GlobalProfile @relation(fields: [globalProfileId], references: [id], onDelete: Cascade)
+
+  ownerOid Int
+  owner    Cell @relation(fields: [ownerOid], references: [oid])
+
+  groupAssignments  WorkspaceGroupAssignment[]
+  policyAssignments WorkspacePolicyAssignment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+}
+
+enum WorkspaceInviteStatus {
+  pending
+  accepted
+  rejected
+  deleted
+}
+
+model WorkspaceInvite {
+  id String @id
+
+  status WorkspaceInviteStatus @default(pending)
+
+  email String
+
+  accountId String
+
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  globalProfileId String
+  globalProfile   GlobalProfile @relation(fields: [globalProfileId], references: [id], onDelete: Cascade)
+
+  consumerInviteId     String? @unique
+  organizationInviteId String? @unique
+  enterpriseInviteId   String? @unique
+
+  ownerOid Int
+  owner    Cell @relation(fields: [ownerOid], references: [oid])
+
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @default(now()) @updatedAt
+  expiresAt DateTime
+
+  @@unique([workspaceId, globalProfileId])
+  @@index([accountId])
+  @@index([workspaceId])
+  @@index([globalProfileId])
+}
+
+enum WorkspaceGroupType {
+  organization_team
+  consumer_group
+}
+
+enum WorkspaceGroupStatus {
+  active
+  archived
+  deleted
+}
+
+enum WorkspacePolicyType {
+  organization_policy
+  enterprise_role
+}
+
+enum WorkspacePolicyStatus {
+  active
+  archived
+  deleted
+}
+
+enum WorkspaceAssignmentType {
+  everyone
+  admin
+  custom
+}
+
+model WorkspaceGroup {
+  id String @id
+
+  type   WorkspaceGroupType
+  status WorkspaceGroupStatus @default(active)
+
+  assignmentType WorkspaceAssignmentType
+
+  name        String
+  description String?
+
+  accountId String
+
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  ownerOid Int
+  owner    Cell @relation(fields: [ownerOid], references: [oid])
+
+  workspaceGroupAssignments WorkspaceGroupAssignment[]
+  policyAssignments         WorkspacePolicyAssignment[]
+
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @default(now()) @updatedAt
+
+  @@index([accountId])
+  @@index([workspaceId])
+}
+
+model WorkspacePolicy {
+  id String @id
+
+  type   WorkspacePolicyType
+  status WorkspacePolicyStatus @default(active)
+
+  assignmentType WorkspaceAssignmentType
+
+  name        String
+  description String?
+
+  accountId String
+
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  ownerOid Int
+  owner    Cell @relation(fields: [ownerOid], references: [oid])
+
+  assignments WorkspacePolicyAssignment[]
+
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @default(now()) @updatedAt
+
+  @@index([accountId])
+  @@index([workspaceId])
+}
+
+model WorkspaceGroupAssignment {
+  id String @id
+
+  accountId   String
+  workspaceId String
+
+  workspaceGroupId String
+  workspaceGroup   WorkspaceGroup @relation(fields: [workspaceGroupId], references: [id], onDelete: Cascade)
+
+  workspaceProfileId String
+  workspaceProfile   WorkspaceProfile @relation(fields: [workspaceProfileId], references: [id], onDelete: Cascade)
+
+  ownerOid Int
+  owner    Cell @relation(fields: [ownerOid], references: [oid])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@unique([workspaceGroupId, workspaceProfileId])
+  @@index([accountId])
+  @@index([workspaceId])
+  @@index([workspaceGroupId])
+  @@index([workspaceProfileId])
+}
+
+model WorkspacePolicyAssignment {
+  id String @id
+
+  accountId   String
+  workspaceId String
+
+  workspacePolicyId String
+  workspacePolicy   WorkspacePolicy @relation(fields: [workspacePolicyId], references: [id], onDelete: Cascade)
+
+  workspaceGroupId String?
+  workspaceGroup   WorkspaceGroup? @relation(fields: [workspaceGroupId], references: [id], onDelete: Cascade)
+
+  workspaceProfileId String?
+  workspaceProfile   WorkspaceProfile? @relation(fields: [workspaceProfileId], references: [id], onDelete: Cascade)
+
+  ownerOid Int
+  owner    Cell @relation(fields: [ownerOid], references: [oid])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@unique([workspacePolicyId, workspaceGroupId])
+  @@unique([workspacePolicyId, workspaceProfileId])
+  @@index([accountId])
+  @@index([workspaceId])
+  @@index([workspacePolicyId])
+  @@index([workspaceGroupId])
+  @@index([workspaceProfileId])
+}

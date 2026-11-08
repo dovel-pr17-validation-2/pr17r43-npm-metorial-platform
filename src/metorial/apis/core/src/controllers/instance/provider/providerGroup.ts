@@ -1,0 +1,225 @@
+import { badRequestError, ServiceError } from '@lowerdeck/error';
+import { Paginator } from '@lowerdeck/pagination';
+import { v } from '@lowerdeck/validation';
+import {
+  providerListingGroupService,
+  providerListingService
+} from '@metorial-subspace/module-catalog';
+import { Controller } from '@metorial/rest';
+import { dateFilterValidator } from '../../../lib/dateFilter';
+import { normalizeArrayParam } from '../../../lib/normalizeArrayParam';
+import { checkAccess } from '../../../middleware/checkAccess';
+import { integrationsGroup, instancePath } from '../../../middleware/instanceGroup';
+import { providerGroupPresenter } from '@metorial/presenters';
+
+let providerGroupGroup = integrationsGroup.use(async ctx => {
+  if (!ctx.params.providerGroupId) {
+    throw new ServiceError(
+      badRequestError({
+        message: 'providerGroupId is required',
+        description: 'The providerGroupId path parameter is required.'
+      })
+    );
+  }
+
+  let group = await providerListingGroupService.getProviderListingGroupById({
+    instance: ctx.instance,
+    providerListingGroupId: ctx.params.providerGroupId
+  });
+
+  return { group };
+});
+
+export let providerGroupController = Controller.create(
+  {
+    name: 'Provider Groups',
+    description:
+      "A group is a user-defined custom folder for organizing providers in your instance like 'Sales Tools' or 'Engineering'.",
+    hideInDocs: true
+  },
+  {
+    list: integrationsGroup
+      .get(instancePath('provider-groups', 'providerGroups.list'), {
+        name: 'List provider groups',
+        description: 'Returns a paginated list of provider groups.'
+      })
+      .use(checkAccess({ possibleScopes: ['instance.provider.group:read'] }))
+      .outputList(providerGroupPresenter)
+      .query(
+        'default',
+        Paginator.validate(
+          v.object({
+            id: v.optional(v.union([v.string(), v.array(v.string())]), {
+              description: 'Filter by group ID(s)'
+            }),
+            provider_id: v.optional(v.union([v.string(), v.array(v.string())]), {
+              description: 'Filter by provider ID(s)'
+            }),
+            provider_listing_id: v.optional(v.union([v.string(), v.array(v.string())]), {
+              description: 'Filter by provider listing ID(s)'
+            }),
+            created_at: dateFilterValidator('provider group creation time'),
+            updated_at: dateFilterValidator('provider group last update time')
+          })
+        )
+      )
+      .do(async ctx => {
+        let paginator = await providerListingGroupService.listProviderListingGroups({
+          instance: ctx.instance,
+          ids: normalizeArrayParam(ctx.query.id),
+          providerIds: normalizeArrayParam(ctx.query.provider_id),
+          providerListingIds: normalizeArrayParam(ctx.query.provider_listing_id),
+          createdAt: ctx.query.created_at,
+          updatedAt: ctx.query.updated_at
+        });
+
+        let list = await paginator.run(ctx.query);
+
+        return Paginator.present(list, group => providerGroupPresenter.present({ group }));
+      }),
+
+    get: providerGroupGroup
+      .get(instancePath('provider-groups/:providerGroupId', 'providerGroups.get'), {
+        name: 'Get provider group',
+        description: 'Retrieves a specific provider group by ID.'
+      })
+      .use(checkAccess({ possibleScopes: ['instance.provider.group:read'] }))
+      .output(providerGroupPresenter)
+      .do(async ctx => {
+        return providerGroupPresenter.present({ group: ctx.group });
+      }),
+
+    create: integrationsGroup
+      .post(instancePath('provider-groups', 'providerGroups.create'), {
+        name: 'Create provider group',
+        description: 'Creates a new custom provider group.'
+      })
+      .use(checkAccess({ possibleScopes: ['instance.provider.group:write'] }))
+      .body(
+        'default',
+        v.object({
+          name: v.string({ examples: ['Sales Integrations'] }),
+          description: v.optional(
+            v.string({ examples: ['CRM and sales pipeline integrations'] })
+          )
+        })
+      )
+      .output(providerGroupPresenter)
+      .do(async ctx => {
+        let group = await providerListingGroupService.createProviderListingGroup({
+          instance: ctx.instance,
+          auditScope: ctx.auditScope,
+          input: {
+            name: ctx.body.name,
+            description: ctx.body.description
+          }
+        });
+
+        return providerGroupPresenter.present({
+          group
+        });
+      }),
+
+    update: providerGroupGroup
+      .patch(instancePath('provider-groups/:providerGroupId', 'providerGroups.update'), {
+        name: 'Update provider group',
+        description: 'Updates an existing provider group.'
+      })
+      .use(checkAccess({ possibleScopes: ['instance.provider.group:write'] }))
+      .body(
+        'default',
+        v.object({
+          name: v.optional(v.string({ examples: ['Engineering Tools'] })),
+          description: v.optional(
+            v.string({ examples: ['Developer and DevOps integrations'] })
+          )
+        })
+      )
+      .output(providerGroupPresenter)
+      .do(async ctx => {
+        let group = await providerListingGroupService.updateProviderListingGroup({
+          instance: ctx.instance,
+          auditScope: ctx.auditScope,
+          providerListingGroup: ctx.group,
+          input: {
+            name: ctx.body.name,
+            description: ctx.body.description
+          }
+        });
+
+        return providerGroupPresenter.present({
+          group
+        });
+      }),
+
+    addListing: providerGroupGroup
+      .post(
+        instancePath('provider-groups/:providerGroupId/listings', 'providerGroups.addListing'),
+        {
+          name: 'Add listing to group',
+          description: 'Adds a provider listing to a group.'
+        }
+      )
+      .use(checkAccess({ possibleScopes: ['instance.provider.group:write'] }))
+      .body(
+        'default',
+        v.object({
+          provider_listing_id: v.string({ examples: ['plg_abc123'] })
+        })
+      )
+      .output(providerGroupPresenter)
+      .do(async ctx => {
+        let providerListing = await providerListingService.getProviderListingById({
+          instance: ctx.instance,
+          providerListingId: ctx.body.provider_listing_id
+        });
+
+        await providerListingGroupService.addProviderToGroup({
+          instance: ctx.instance,
+          auditScope: ctx.auditScope,
+          providerListingGroup: ctx.group,
+          providerListing
+        });
+
+        return providerGroupPresenter.present({ group: ctx.group });
+      }),
+
+    removeListing: providerGroupGroup
+      .delete(
+        instancePath(
+          'provider-groups/:providerGroupId/listings/:providerListingId',
+          'providerGroups.removeListing'
+        ),
+        {
+          name: 'Remove listing from group',
+          description: 'Removes a provider listing from a group.'
+        }
+      )
+      .use(checkAccess({ possibleScopes: ['instance.provider.group:write'] }))
+      .output(providerGroupPresenter)
+      .do(async ctx => {
+        if (!ctx.params.providerListingId) {
+          throw new ServiceError(
+            badRequestError({
+              message: 'providerListingId is required',
+              description: 'The providerListingId path parameter is required.'
+            })
+          );
+        }
+
+        let providerListing = await providerListingService.getProviderListingById({
+          instance: ctx.instance,
+          providerListingId: ctx.params.providerListingId
+        });
+
+        await providerListingGroupService.removeProviderFromGroup({
+          instance: ctx.instance,
+          auditScope: ctx.auditScope,
+          providerListingGroup: ctx.group,
+          providerListing
+        });
+
+        return providerGroupPresenter.present({ group: ctx.group });
+      })
+  }
+);

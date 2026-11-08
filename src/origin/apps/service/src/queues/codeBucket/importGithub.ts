@@ -1,0 +1,57 @@
+import { createQueue } from '@lowerdeck/queue';
+import { db } from '../../db';
+import { env } from '../../env';
+import { codeBucketClient } from '../../lib/codeWorkspace';
+import { getInstallationAccessToken, getGitHubTransferEndpoints } from '../../lib/githubApp';
+import { runCodeBucketImport } from './importError';
+
+export let importGithubQueue = createQueue<{
+  newBucketId: string;
+  owner: string;
+  repo: string;
+  ref: string;
+  path: string;
+  repoId: string;
+}>({
+  name: 'ori/imp/gh',
+  workerOpts: { concurrency: 50 },
+  redisUrl: env.service.REDIS_URL
+});
+
+export let importGithubQueueProcessor = importGithubQueue.process(async data => {
+  let repo = await db.scmRepository.findFirstOrThrow({
+    where: { id: data.repoId },
+    include: { installation: { include: { backend: true } } }
+  });
+  if (!repo.installation.externalInstallationId) {
+    throw new Error('Installation ID not found');
+  }
+
+  await runCodeBucketImport({
+    provider: 'github',
+    bucketId: data.newBucketId,
+    context: {
+      owner: data.owner,
+      repo: data.repo,
+      ref: data.ref,
+      path: data.path,
+      repoId: data.repoId
+    },
+    importFn: async () => {
+      let token = await getInstallationAccessToken(
+        repo.installation.externalInstallationId!,
+        repo.installation.backend
+      );
+
+      await codeBucketClient.createBucketFromGithub({
+        newBucketId: data.newBucketId,
+        owner: data.owner,
+        repo: data.repo,
+        ref: data.ref,
+        path: data.path,
+        token,
+        ...getGitHubTransferEndpoints(repo.installation.backend, data.owner, data.repo)
+      });
+    }
+  });
+});

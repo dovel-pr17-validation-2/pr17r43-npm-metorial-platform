@@ -1,0 +1,145 @@
+import { createCron } from '@metorial/cron';
+import { addAfterTransactionHook, db } from '@metorial/db';
+import { Fabric } from '@metorial/fabric';
+import { createQueue, hourlyPacedDelay } from '@metorial/queue';
+import { cell } from '../../cell';
+import { globalDB } from '../../db';
+import { upsertOrganization } from './organization';
+
+let SYNC_PAGE_SIZE = 500;
+
+export let syncPortalsCron = createCron(
+  {
+    name: 'global/sync/from-deployment/portal',
+    cron: process.env.NODE_ENV == 'production' ? '0 * * * *' : '* * * * *'
+  },
+  async () => {
+    await syncPortalsManyQueue.add({});
+  }
+);
+
+let syncPortalsManyQueue = createQueue<{ cursor?: string }>({
+  name: 'global/sync/from-deployment/portal-many',
+  workerOpts: { concurrency: 1 }
+});
+
+export let syncPortalsManyQueueProcessor = syncPortalsManyQueue.process(async data => {
+  let portals = await db.portal.findMany({
+    where: {
+      id: { gt: data.cursor }
+    },
+    orderBy: { id: 'asc' },
+    take: SYNC_PAGE_SIZE,
+    select: { id: true }
+  });
+  if (portals.length === 0) return;
+
+  await syncPortalSingleQueue.addMany(portals.map(portal => ({ portalId: portal.id })));
+
+  if (portals.length === SYNC_PAGE_SIZE) {
+    await syncPortalsManyQueue.add(
+      { cursor: portals[portals.length - 1].id },
+      hourlyPacedDelay()
+    );
+  }
+});
+
+let syncPortalSingleQueue = createQueue<{ portalId: string }>({
+  name: 'global/sync/from-deployment/portal-single',
+  workerOpts: { concurrency: 5, limiter: { max: 10, duration: 1000 } }
+});
+
+export let syncPortalSingleQueueProcessor = syncPortalSingleQueue.process(async data => {
+  let portal = await db.portal.findUnique({
+    where: { id: data.portalId },
+    include: {
+      organization: {
+        select: {
+          id: true
+        }
+      },
+      instance: {
+        select: {
+          id: true
+        }
+      }
+    }
+  });
+  if (!portal) return;
+
+  await upsertOrganization(portal.organization.id);
+
+  let inner = {
+    status: portal.status,
+    name: portal.name,
+    description: portal.description,
+    slug: portal.slug,
+    organizationId: portal.organization.id,
+    instanceId: portal.instance.id,
+    archivedAt: portal.archivedAt,
+    deletedAt: portal.deletedAt,
+    createdAt: portal.createdAt,
+    ownerOid: (await cell).oid
+  };
+
+  await globalDB.portal.createMany({
+    data: {
+      id: portal.id,
+      ...inner
+    },
+    skipDuplicates: true
+  });
+
+  let globalPortals = await globalDB.portal.findMany({
+    where: {
+      OR: [{ id: portal.id }, { slug: portal.slug }]
+    },
+    select: {
+      id: true,
+      slug: true,
+      ownerOid: true
+    }
+  });
+  let globalPortalById = globalPortals.find(globalPortal => globalPortal.id === portal.id);
+  let globalPortalBySlug = globalPortals.find(
+    globalPortal => globalPortal.slug === portal.slug
+  );
+
+  if (globalPortalBySlug && globalPortalBySlug.id !== portal.id) {
+    console.warn('global_portal_sync.slug_conflict', {
+      portalId: portal.id,
+      slug: portal.slug,
+      ownerOid: inner.ownerOid,
+      conflictingPortalId: globalPortalBySlug.id,
+      conflictingOwnerOid: globalPortalBySlug.ownerOid
+    });
+    return;
+  }
+
+  if (!globalPortalById) {
+    throw new Error(`Global portal disappeared while syncing ${portal.id}`);
+  }
+
+  await globalDB.portal.update({
+    where: { id: portal.id },
+    data: inner
+  });
+});
+
+Fabric.listen('portal.created:after', async event => {
+  await addAfterTransactionHook(() =>
+    syncPortalSingleQueue.add({ portalId: event.portal.id })
+  );
+});
+
+Fabric.listen('portal.updated:after', async event => {
+  await addAfterTransactionHook(() =>
+    syncPortalSingleQueue.add({ portalId: event.portal.id })
+  );
+});
+
+Fabric.listen('portal.archived:after', async event => {
+  await addAfterTransactionHook(() =>
+    syncPortalSingleQueue.add({ portalId: event.portal.id })
+  );
+});

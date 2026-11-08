@@ -1,0 +1,110 @@
+import { forbiddenError, ServiceError, unauthorizedError } from '@lowerdeck/error';
+import type { Instance, OrganizationActor } from '@metorial/db';
+import { AuthInfo } from '@metorial/module-access';
+import { Authenticator } from '@metorial/rest';
+
+export type McpSessionInfo = {
+  instance: Instance;
+  auth: AuthInfo;
+  organizationActor?: OrganizationActor;
+};
+
+export let authenticateAndResolveInstance = async (
+  request: Request,
+  url: URL,
+  authenticate: Authenticator<AuthInfo>
+): Promise<McpSessionInfo> => {
+  let result = await authenticate(request, url);
+  let auth = result.auth;
+
+  let requestedSessionId = url.pathname.split('/').pop();
+
+  if (auth.type === 'fine_grained') {
+    let allowedSessionIds = auth.restrictions.accessTagGrants
+      .filter(grant => grant.resourceType == 'subspace.session')
+      .map(grant => grant.resourceId);
+
+    if (!requestedSessionId || !allowedSessionIds.includes(requestedSessionId)) {
+      throw new ServiceError(
+        forbiddenError({
+          message: 'Fine grained token is not authorized for this session',
+          description:
+            'This fine grained token can only be used with explicitly tagged sessions.'
+        })
+      );
+    }
+
+    return {
+      instance: {
+        ...auth.restrictions.instance,
+        organization: auth.restrictions.organization
+      } as Instance,
+      auth
+    };
+  }
+
+  if (auth.type === 'machine') {
+    if ('instance' in auth.restrictions) {
+      return {
+        instance: {
+          ...auth.restrictions.instance,
+          organization: auth.restrictions.organization
+        } as Instance,
+        auth,
+        organizationActor: auth.restrictions.consumer ? undefined : auth.restrictions.actor
+      };
+    }
+
+    throw new ServiceError(
+      forbiddenError({
+        message: 'Instance-scoped API key required for MCP connections',
+        description:
+          'Organization-scoped API keys cannot be used with the MCP proxy. Use an instance-scoped API key instead.'
+      })
+    );
+  }
+
+  throw new ServiceError(
+    unauthorizedError({
+      message: 'API key authentication required',
+      description:
+        'MCP gateway connections require an API key. Use a Bearer token with your API key.'
+    })
+  );
+};
+
+export let authenticateSessionConnection = async (
+  request: Request,
+  url: URL,
+  authenticate: Authenticator<AuthInfo>
+): Promise<McpSessionInfo> => {
+  let info = await authenticateAndResolveInstance(request, url, authenticate);
+
+  if (
+    info.auth.type === 'machine' &&
+    info.auth.machineAccess.type === 'instance_publishable'
+  ) {
+    throw new ServiceError(
+      forbiddenError({
+        message: 'Secret API key required for MCP session connections',
+        description:
+          'Connect to a session with an instance secret API key or the session client secret. Publishable keys cannot be used here.'
+      })
+    );
+  }
+
+  if (
+    info.auth.type === 'machine' &&
+    'instance' in info.auth.restrictions &&
+    info.auth.restrictions.consumer
+  ) {
+    throw new ServiceError(
+      forbiddenError({
+        message: 'Consumer credentials cannot connect to sessions directly',
+        description: 'Connect through a magic MCP server or endpoint instead.'
+      })
+    );
+  }
+
+  return info;
+};

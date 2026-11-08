@@ -1,0 +1,103 @@
+model SsoDirectory {
+  oid BigInt @id
+  id  String @unique
+
+  status SsoDirectoryStatus @default(active)
+
+  connectionOid BigInt
+  connection    SsoConnection @relation(fields: [connectionOid], references: [oid], onDelete: Cascade)
+
+  internalId String @unique
+
+  name         String
+  type         String
+  scimPath     String
+  scimEndpoint String
+  scimSecret   String
+
+  /// [JsonObject]
+  metadata Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  ownedUserProfiles SsoUserProfile[]          @relation("SsoUserProfileOwnerDirectory")
+  userProfiles      SsoDirectoryUserProfile[]
+  groups            SsoDirectoryGroup[]
+  roles             SsoDirectoryRole[]
+  scimOperations    SsoScimOperation[]
+
+  @@unique([connectionOid, internalId])
+}
+
+model SsoDirectoryGroup {
+  oid BigInt @id
+  id  String @unique
+
+  directoryOid BigInt
+  directory    SsoDirectory @relation(fields: [directoryOid], references: [oid], onDelete: Cascade)
+
+  groupOid BigInt
+  group    SsoConnectionGroup @relation(fields: [groupOid], references: [oid], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@unique([directoryOid, groupOid])
+  @@index([groupOid])
+}
+
+model SsoDirectoryRole {
+  oid BigInt @id
+  id  String @unique
+
+  directoryOid BigInt
+  directory    SsoDirectory @relation(fields: [directoryOid], references: [oid], onDelete: Cascade)
+
+  roleOid BigInt
+  role    SsoConnectionRole @relation(fields: [roleOid], references: [oid], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@unique([directoryOid, roleOid])
+  @@index([roleOid])
+}
+
+model SsoScimOperation {
+  oid BigInt @id
+  id  String @unique
+
+  directoryOid BigInt?
+  directory    SsoDirectory? @relation(fields: [directoryOid], references: [oid], onDelete: SetNull)
+
+  appOid BigInt?
+  app    App?    @relation(fields: [appOid], references: [oid], onDelete: SetNull)
+
+  internalDirectoryId String
+  method              String
+  resourceType        String
+  resourceId          String?
+  statusCode          Int
+  success             Boolean
+  durationMs          Int
+  eventNames          String[]
+  errorMessage        String?  @db.Text
+
+  /// [JsonObject]
+  query Json?
+
+  /// [JsonValue]
+  requestBody Json?
+
+  /// [JsonValue]
+  responseBody Json?
+
+  createdAt DateTime @default(now())
+
+  userChanges SsoUserChange[]
+
+  @@index([createdAt])
+  @@index([directoryOid, createdAt])
+  @@index([appOid, createdAt])
+}

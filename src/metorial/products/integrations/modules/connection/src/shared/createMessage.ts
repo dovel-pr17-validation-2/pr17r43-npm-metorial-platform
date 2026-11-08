@@ -1,0 +1,231 @@
+import { getSentry } from '@lowerdeck/sentry';
+import {
+  getJsonSizeBytes,
+  offload,
+  sessionMessageBucketRecord
+} from '@metorial-subspace/connection-utils';
+import {
+  db,
+  getId,
+  Prisma,
+  type ProviderTool,
+  type Session,
+  type SessionConnection,
+  type SessionConnectionTransport,
+  type SessionError,
+  type SessionMessage,
+  type SessionMessageFailureReason,
+  type SessionMessageSource,
+  type SessionMessageStatus,
+  type SessionMessageType,
+  type SessionParticipant,
+  type SessionProvider
+} from '@metorial-subspace/db';
+import { getRetentionPolicy } from '@metorial-subspace/provider-utils';
+import { messageCreatedQueue } from '../queues/message/messageCreated';
+import { createError, messageFailureReasonToErrorType } from './createError';
+
+export let DIRECT_OFFLOAD_MIN_BYTES = 128 * 1024;
+
+let Sentry = getSentry();
+
+export interface CreateMessageProps {
+  status: SessionMessageStatus;
+  type: SessionMessageType;
+  source: SessionMessageSource;
+  senderParticipant: SessionParticipant;
+  transport: SessionConnectionTransport;
+  failureReason?: SessionMessageFailureReason;
+
+  input: PrismaJson.SessionMessageInput;
+  output?: PrismaJson.SessionMessageOutput;
+  responderParticipant?: SessionParticipant;
+
+  parentMessage?: SessionMessage;
+
+  provider?: SessionProvider;
+
+  tool?: ProviderTool;
+  rationale?: string;
+  operation?: string;
+  methodOrToolKey?: string;
+
+  isProductive: boolean;
+
+  clientMcpId?: PrismaJson.SessionMessageClientMcpId;
+  providerMcpId?: string;
+
+  completedAt?: Date;
+}
+
+export interface CreateMessagePropsFull extends CreateMessageProps {
+  session: Session;
+  connection: SessionConnection | null;
+}
+
+export let createMessage = async (data: CreateMessagePropsFull) => {
+  if (data.output && !data.responderParticipant) {
+    throw new Error('responderParticipant is required when output is provided');
+  }
+
+  if (data.output?.type === 'error') {
+    data.status = 'failed';
+  }
+
+  if (data.status && data.status !== 'waiting_for_response') {
+    data.completedAt = data.completedAt ?? new Date();
+  }
+
+  if (data.status === 'failed' && (!data.failureReason || data.failureReason === 'none')) {
+    data.failureReason = 'provider_error';
+  }
+
+  if (data.status === 'failed' && !data.output) {
+    data.output = {
+      type: 'error',
+      data: { code: 'unknown', message: 'An unknown error occurred' }
+    };
+  }
+
+  let retention = getRetentionPolicy(data.session);
+  let hasOutput = !!data.output;
+  let storeToolCall = !!data.tool && retention.storeToolIdentity;
+
+  let error: SessionError | undefined;
+  if (data.status === 'failed') {
+    error = await createError({
+      type: messageFailureReasonToErrorType(data.failureReason ?? 'provider_error'),
+      session: data.session,
+      connection: data.connection,
+      output: data.output!
+    });
+  }
+
+  let inputSize = retention.storeContent ? getJsonSizeBytes(data.input) : 0;
+  let outputSize = retention.storeContent ? getJsonSizeBytes(data.output) : 0;
+
+  // Large one-shot control responses (tools/list, ...) never need to sit in the database:
+  // nothing reads them inline and they would only be moved to storage later.
+  let isDirectOffload =
+    retention.storeContent &&
+    data.type === 'mcp_control' &&
+    hasOutput &&
+    data.status !== 'waiting_for_response' &&
+    inputSize + outputSize >= DIRECT_OFFLOAD_MIN_BYTES;
+
+  let message = await db.sessionMessage.create({
+    data: {
+      ...getId('sessionMessage'),
+      type: data.type,
+      status: data.status,
+      source: data.source,
+      transport: data.transport,
+
+      isProductive: data.isProductive,
+      failureReason: data.failureReason ?? 'none',
+      completedAt: data.completedAt,
+
+      retentionLevel: retention.level,
+      hasOutput,
+
+      errorOid: error?.oid,
+      sessionOid: data.session.oid,
+      connectionOid: data.connection?.oid,
+      tenantOid: data.session.tenantOid,
+      projectOid: data.session.projectOid,
+      solutionOid: data.session.solutionOid,
+      sessionProviderOid: data.provider?.oid,
+      bucketOid: sessionMessageBucketRecord.oid,
+      parentMessageOid: data.parentMessage?.oid,
+      environmentOid: data.session.environmentOid,
+      instanceOid: data.session.instanceOid,
+      senderParticipantOid: data.senderParticipant.oid,
+      responderParticipantOid: data.responderParticipant?.oid,
+
+      input: retention.storeContent && !isDirectOffload ? data.input : Prisma.DbNull,
+      output: retention.storeContent && !isDirectOffload ? data.output : Prisma.DbNull,
+      inputSize,
+      outputSize,
+      isOffloadedToStorage: isDirectOffload,
+
+      methodOrToolKey: retention.storeToolIdentity
+        ? (data.tool?.key ?? data.methodOrToolKey ?? null)
+        : null,
+      clientMcpId: data.clientMcpId ?? null,
+      providerMcpId: data.providerMcpId ?? null,
+
+      toolCall: storeToolCall
+        ? {
+            create: {
+              ...getId('toolCall'),
+              toolOid: data.tool!.oid,
+              toolKey: data.tool!.key,
+              rationale: data.rationale,
+              operation: data.operation,
+              sessionOid: data.session.oid,
+              tenantOid: data.session.tenantOid,
+              projectOid: data.session.projectOid,
+              solutionOid: data.session.solutionOid,
+              environmentOid: data.session.environmentOid,
+              instanceOid: data.session.instanceOid
+            }
+          }
+        : undefined
+    }
+  });
+
+  let eventBase = {
+    sessionOid: message.sessionOid,
+    connectionOid: message.connectionOid,
+    providerRunOid: message.providerRunOid,
+    messageOid: message.oid,
+    tenantOid: message.tenantOid,
+    projectOid: message.projectOid,
+    solutionOid: message.solutionOid,
+    environmentOid: message.environmentOid,
+    instanceOid: message.instanceOid
+  };
+
+  await db.sessionEvent.createMany({
+    data: [
+      { ...getId('sessionEvent'), type: 'message_created' as const, ...eventBase },
+      ...(message.status !== 'waiting_for_response'
+        ? [{ ...getId('sessionEvent'), type: 'message_processed' as const, ...eventBase }]
+        : [])
+    ]
+  });
+
+  await messageCreatedQueue.add({ messageId: message.id });
+
+  if (isDirectOffload) {
+    let body = { id: message.id, input: data.input, output: data.output ?? null };
+
+    offload.offloadSessionMessageWithRetry(body).catch(async e => {
+      Sentry.captureException(e);
+
+      // Keep the body: put it back into the row so the regular offload cron moves it later.
+      await db.sessionMessage
+        .updateMany({
+          where: { oid: message.oid },
+          data: {
+            input: data.input,
+            output: data.output ?? Prisma.DbNull,
+            isOffloadedToStorage: false
+          }
+        })
+        .catch(restoreError => Sentry.captureException(restoreError));
+    });
+
+    return { ...message, input: data.input, output: data.output ?? null };
+  }
+
+  if (!retention.storeContent) {
+    return {
+      ...message,
+      input: data.input,
+      output: data.output ?? null
+    };
+  }
+
+  return message;
+};

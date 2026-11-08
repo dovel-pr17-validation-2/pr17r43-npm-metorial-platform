@@ -1,0 +1,654 @@
+import type { AssistantConversationMessage, AssistantLiveStateItem } from '@metorial/state';
+import { Button, Error, Text, theme, useCopy } from '@metorial/ui';
+import {
+  RiArrowLeftSLine,
+  RiArrowRightSLine,
+  RiArrowUpLine,
+  RiCheckLine,
+  RiCloseLine,
+  RiEditLine,
+  RiFileCopyLine
+} from '@remixicon/react';
+import 'katex/dist/katex.min.css';
+import React from 'react';
+import ReactMarkdown, { type Components } from 'react-markdown';
+import TextareaAutosize from 'react-textarea-autosize';
+import rehypeKatex from 'rehype-katex';
+import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import styled from 'styled-components';
+import { TextShimmer } from './textShimmer';
+import { BashToolCard } from './tools/bashTool';
+import { EditToolCard } from './tools/editTool';
+import { McpToolCard } from './tools/mcpTool';
+import { SearchToolCard } from './tools/searchTool';
+import {
+  getStatusLabel,
+  ToolContentStack,
+  ToolDetail,
+  ToolDisclosureCard,
+  ToolHeader,
+  ToolHeaderMain,
+  ToolPathTag,
+  ToolStatusBadge,
+  ToolSurfaceCard,
+  ToolTitle
+} from './tools/shared';
+import { WebToolCard } from './tools/webTool';
+import type { AssistantTranscriptMessageMeta } from './types';
+
+let Row = styled.div<{ 'data-align'?: 'start' | 'end' }>`
+  display: flex;
+  width: 100%;
+  justify-content: ${p => (p['data-align'] == 'end' ? 'flex-end' : 'flex-start')};
+`;
+
+let MessageColumn = styled.div<{ 'data-tone'?: 'user' | 'assistant' | 'system' }>`
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  max-width: min(760px, 92%);
+  align-items: ${p => (p['data-tone'] == 'user' ? 'flex-end' : 'flex-start')};
+`;
+
+let MessageSurface = styled.div<{ 'data-tone'?: 'user' | 'assistant' | 'system' }>`
+  width: ${p => (p['data-tone'] == 'assistant' ? '100%' : 'auto')};
+  max-width: 100%;
+  border-radius: ${p => (p['data-tone'] == 'user' ? '20px' : '16px')};
+  padding: ${p => (p['data-tone'] == 'assistant' ? '0' : '12px 16px')};
+  background: ${p =>
+    p['data-tone'] == 'user'
+      ? `color-mix(in srgb, ${theme.colors.foreground} 4%, ${theme.colors.background})`
+      : p['data-tone'] == 'system'
+        ? theme.colors.gray100
+        : 'transparent'};
+  box-shadow: ${p =>
+    p['data-tone'] == 'assistant' ? 'none' : '0 1px 2px rgba(15, 23, 42, 0.04)'};
+`;
+
+let MessageActions = styled.div<{ 'data-tone'?: 'user' | 'assistant' | 'system' }>`
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  justify-content: ${p => (p['data-tone'] == 'user' ? 'flex-end' : 'flex-start')};
+`;
+
+let SiblingPositionText = styled(Text).attrs({
+  size: '1'
+})`
+  color: color-mix(in srgb, ${theme.colors.foreground} 58%, transparent);
+  min-width: 32px;
+  text-align: center;
+`;
+
+let InlineEditWrap = styled.div`
+  width: 80%;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+`;
+
+let InlineEditInput = styled(TextareaAutosize)`
+  width: 100%;
+  min-height: 44px;
+  resize: none;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: ${theme.colors.foreground};
+  font-size: 14px;
+  line-height: 1.6;
+  overflow: auto;
+
+  &::placeholder {
+    color: color-mix(in srgb, ${theme.colors.foreground} 48%, transparent);
+  }
+`;
+
+let getCopyValue = (
+  parts: Extract<AssistantLiveStateItem, { type: 'message' }>['message']['parts']
+) => {
+  return parts
+    .map(part => {
+      if (part.type == 'text') return part.text;
+      return part.filename ?? `${part.mediaType} attachment`;
+    })
+    .join('\n\n')
+    .trim();
+};
+
+let MarkdownWrapper = styled.div`
+  font-size: 14px;
+  line-height: 1.65;
+  color: ${theme.colors.foreground};
+
+  p {
+    margin: 0 0 12px;
+  }
+
+  p:last-child {
+    margin-bottom: 0;
+  }
+
+  ul,
+  ol {
+    padding-left: 18px;
+    margin: 0 0 12px;
+  }
+
+  li + li {
+    margin-top: 4px;
+  }
+
+  ul li {
+    list-style-type: disc;
+  }
+
+  ol li {
+    list-style-type: decimal;
+  }
+
+  blockquote {
+    margin: 0 0 12px;
+    padding: 12px 14px;
+    border-left: 3px solid color-mix(in srgb, ${theme.colors.foreground} 18%, transparent);
+    border-radius: 10px;
+    background: color-mix(in srgb, ${theme.colors.foreground} 3%, ${theme.colors.background});
+    color: color-mix(in srgb, ${theme.colors.foreground} 82%, transparent);
+  }
+
+  blockquote p:last-child {
+    margin-bottom: 0;
+  }
+
+  code {
+    font-family:
+      'JetBrains Mono', 'Source Code Pro', ui-monospace, SFMono-Regular, Menlo, Monaco,
+      Consolas, monospace;
+    font-size: 0.92em;
+    background: color-mix(in srgb, ${theme.colors.foreground} 6%, transparent);
+    padding: 2px 5px;
+    border-radius: 5px;
+  }
+
+  pre {
+    margin: 0 0 12px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    border: 1px solid color-mix(in srgb, ${theme.colors.foreground} 9%, transparent);
+    border-radius: 12px;
+    background: color-mix(in srgb, ${theme.colors.foreground} 4%, ${theme.colors.background});
+    line-height: 1.6;
+  }
+
+  pre code {
+    display: block;
+    background: transparent;
+    padding: 0;
+    border-radius: 0;
+  }
+
+  img {
+    display: block;
+    max-width: 100%;
+    height: auto;
+  }
+
+  .katex-display {
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 4px 0;
+  }
+
+  .katex {
+    font-size: 1.02em;
+  }
+`;
+
+let PlainTextWrapper = styled.div`
+  font-size: 14px;
+  line-height: 1.65;
+  color: ${theme.colors.foreground};
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+`;
+
+let STREAMED_WORD_REVEAL_MS = 28;
+
+let splitIntoWordTokens = (text: string) => {
+  return text.match(/\s+|\S+\s*/g) ?? [];
+};
+
+let useStreamedTextReveal = (text: string, enabled?: boolean) => {
+  let initialVisibleText = enabled ? '' : text;
+  let [visibleText, setVisibleText] = React.useState(initialVisibleText);
+  let visibleTextRef = React.useRef(initialVisibleText);
+  let targetTextRef = React.useRef(text);
+  let timeoutRef = React.useRef<number | null>(null);
+
+  let clearRevealTimeout = React.useCallback(() => {
+    if (timeoutRef.current == null) return;
+    window.clearTimeout(timeoutRef.current);
+    timeoutRef.current = null;
+  }, []);
+
+  let setVisible = React.useCallback((nextText: string) => {
+    visibleTextRef.current = nextText;
+    setVisibleText(nextText);
+  }, []);
+
+  let revealNextToken = React.useCallback(() => {
+    let currentText = visibleTextRef.current;
+    let targetText = targetTextRef.current;
+
+    if (currentText == targetText) {
+      timeoutRef.current = null;
+      return;
+    }
+
+    if (!targetText.startsWith(currentText)) {
+      setVisible(targetText);
+      timeoutRef.current = null;
+      return;
+    }
+
+    let remainingText = targetText.slice(currentText.length);
+    let [nextToken] = splitIntoWordTokens(remainingText);
+
+    setVisible(currentText + (nextToken ?? remainingText));
+    timeoutRef.current = window.setTimeout(revealNextToken, STREAMED_WORD_REVEAL_MS);
+  }, [setVisible]);
+
+  React.useEffect(() => {
+    if (!enabled) {
+      clearRevealTimeout();
+      targetTextRef.current = text;
+      setVisible(text);
+      return;
+    }
+
+    targetTextRef.current = text;
+
+    if (!text.startsWith(visibleTextRef.current)) {
+      clearRevealTimeout();
+      setVisible(text);
+      return;
+    }
+
+    if (visibleTextRef.current != text && timeoutRef.current == null) {
+      timeoutRef.current = window.setTimeout(revealNextToken, STREAMED_WORD_REVEAL_MS);
+    }
+
+    return clearRevealTimeout;
+  }, [clearRevealTimeout, enabled, revealNextToken, setVisible, text]);
+
+  return enabled ? visibleText : text;
+};
+
+let MarkdownTableScroll = styled.div`
+  overflow-x: auto;
+  margin: 0 0 12px;
+  border: 1px solid color-mix(in srgb, ${theme.colors.foreground} 10%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, ${theme.colors.foreground} 2%, ${theme.colors.background});
+`;
+
+let MarkdownTable = styled.table`
+  width: 100%;
+  min-width: 480px;
+  border-collapse: collapse;
+  font-size: 13px;
+  line-height: 1.5;
+`;
+
+let MarkdownTableHeadCell = styled.th`
+  padding: 10px 12px;
+  text-align: left;
+  vertical-align: top;
+  font-weight: 600;
+  color: ${theme.colors.foreground};
+  background: color-mix(in srgb, ${theme.colors.foreground} 4%, ${theme.colors.background});
+`;
+
+let MarkdownTableCell = styled.td`
+  padding: 10px 12px;
+  vertical-align: top;
+  border-top: 1px solid color-mix(in srgb, ${theme.colors.foreground} 8%, transparent);
+`;
+
+let markdownComponents: Components = {
+  a: ({ children, ...props }) => (
+    <a {...props} target="_blank" rel="noreferrer noopener">
+      {children}
+    </a>
+  ),
+  table: ({ children, ...props }) => (
+    <MarkdownTableScroll>
+      <MarkdownTable {...props}>{children}</MarkdownTable>
+    </MarkdownTableScroll>
+  ),
+  th: ({ children, ...props }) => (
+    <MarkdownTableHeadCell {...props}>{children}</MarkdownTableHeadCell>
+  ),
+  td: ({ children, ...props }) => <MarkdownTableCell {...props}>{children}</MarkdownTableCell>
+};
+
+let markdownRemarkPlugins = [remarkGfm, remarkMath];
+let markdownRehypePlugins = [rehypeKatex];
+
+let MessagePart = (p: {
+  renderMarkdown?: boolean;
+  animateText?: boolean;
+  part:
+    | { type: 'text'; text: string }
+    | {
+        type: 'file';
+        filename?: string | undefined;
+        mediaType: string;
+      };
+}) => {
+  let text = useStreamedTextReveal(
+    p.part.type == 'text' ? p.part.text : '',
+    p.animateText && p.part.type == 'text'
+  );
+
+  if (p.part.type == 'text') {
+    if (p.renderMarkdown === false) {
+      return <PlainTextWrapper>{text}</PlainTextWrapper>;
+    }
+
+    return (
+      <MarkdownWrapper>
+        <ReactMarkdown
+          remarkPlugins={markdownRemarkPlugins}
+          rehypePlugins={markdownRehypePlugins}
+          components={markdownComponents}
+        >
+          {text}
+        </ReactMarkdown>
+      </MarkdownWrapper>
+    );
+  }
+
+  return (
+    <ToolPathTag>
+      {p.part.filename ?? 'Attachment'} · {p.part.mediaType}
+    </ToolPathTag>
+  );
+};
+
+let MessageCard = (p: {
+  item: Extract<AssistantLiveStateItem, { type: 'message' }>;
+  message?: AssistantConversationMessage;
+  messageMeta?: AssistantTranscriptMessageMeta;
+  isLive?: boolean;
+  isEditing?: boolean;
+  editingValue?: string;
+  isSubmittingEdit?: boolean;
+  onStartEdit?: (message: AssistantConversationMessage) => void;
+  onEditingChange?: (value: string) => void;
+  onCancelEdit?: () => void;
+  onSubmitEdit?: () => void;
+  onSelectReferenceMessage?: (messageId: string) => void;
+}) => {
+  let role = p.item.message.role;
+  let tone: 'user' | 'assistant' | 'system' =
+    role == 'user' ? 'user' : role == 'system' ? 'system' : 'assistant';
+  let copyValue = getCopyValue(p.item.message.parts);
+  let { copied, copy } = useCopy(copyValue);
+  let canEdit = role == 'user' && !!p.message;
+  let siblingCount = p.messageMeta?.siblingCount ?? 0;
+  let canNavigateSiblings = siblingCount > 1;
+  let canSubmitEdit = !!p.editingValue?.trim() && !p.isSubmittingEdit;
+
+  return (
+    <Row data-align={role == 'user' ? 'end' : 'start'}>
+      <MessageColumn data-tone={tone}>
+        <MessageSurface data-tone={tone}>
+          {p.isEditing && canEdit ? (
+            <InlineEditWrap>
+              <InlineEditInput
+                value={p.editingValue}
+                minRows={1}
+                maxRows={12}
+                placeholder="Edit your message..."
+                onChange={event => p.onEditingChange?.(event.currentTarget.value)}
+                onKeyDown={event => {
+                  if (event.key == 'Enter' && !event.shiftKey) {
+                    event.preventDefault();
+                    if (canSubmitEdit) p.onSubmitEdit?.();
+                  }
+                }}
+              />
+            </InlineEditWrap>
+          ) : (
+            <ToolContentStack>
+              {p.item.message.parts.map((part, index) => (
+                <MessagePart
+                  key={`${p.item.id}:${index}`}
+                  part={part as any}
+                  renderMarkdown={role != 'user'}
+                  animateText={p.isLive && role == 'assistant'}
+                />
+              ))}
+            </ToolContentStack>
+          )}
+        </MessageSurface>
+
+        <MessageActions data-tone={tone}>
+          {canNavigateSiblings && (
+            <>
+              <Button
+                type="button"
+                size="1"
+                variant="ghost"
+                disabled={!p.messageMeta?.previousSibling}
+                iconLeft={<RiArrowLeftSLine style={{ opacity: 0.5 }} />}
+                onClick={() =>
+                  p.messageMeta?.previousSibling &&
+                  p.onSelectReferenceMessage?.(p.messageMeta.previousSibling.id)
+                }
+              />
+
+              <SiblingPositionText>
+                {(p.messageMeta?.siblingIndex ?? 0) + 1}/{siblingCount}
+              </SiblingPositionText>
+
+              <Button
+                type="button"
+                size="1"
+                variant="ghost"
+                disabled={!p.messageMeta?.nextSibling}
+                iconLeft={<RiArrowRightSLine style={{ opacity: 0.5 }} />}
+                onClick={() =>
+                  p.messageMeta?.nextSibling &&
+                  p.onSelectReferenceMessage?.(p.messageMeta.nextSibling.id)
+                }
+              />
+            </>
+          )}
+
+          {!!copyValue && !p.isEditing && (
+            <Button
+              type="button"
+              size="1"
+              variant="ghost"
+              iconLeft={
+                copied ? (
+                  <RiCheckLine style={{ opacity: 0.65 }} />
+                ) : (
+                  <RiFileCopyLine style={{ opacity: 0.5 }} />
+                )
+              }
+              onClick={() => copy()}
+            />
+          )}
+
+          {canEdit && !p.isEditing && (
+            <Button
+              type="button"
+              size="1"
+              variant="ghost"
+              iconLeft={<RiEditLine style={{ opacity: 0.5 }} />}
+              onClick={() => p.message && p.onStartEdit?.(p.message)}
+            />
+          )}
+
+          {p.isEditing && canEdit && (
+            <>
+              <Button
+                type="button"
+                size="1"
+                variant="ghost"
+                iconLeft={<RiCloseLine style={{ opacity: 0.5 }} />}
+                onClick={() => p.onCancelEdit?.()}
+              >
+                Cancel
+              </Button>
+
+              <Button
+                type="button"
+                size="1"
+                variant="ghost"
+                loading={p.isSubmittingEdit}
+                disabled={!canSubmitEdit}
+                iconLeft={<RiArrowUpLine style={{ opacity: 0.5 }} />}
+                onClick={() => p.onSubmitEdit?.()}
+              >
+                Send
+              </Button>
+            </>
+          )}
+        </MessageActions>
+      </MessageColumn>
+    </Row>
+  );
+};
+
+let getReasoningPreview = (text?: string | null) => {
+  let preview = text?.replace(/\s+/g, ' ').trim();
+  if (!preview) return null;
+  return `${preview.slice(0, 250)}...`;
+};
+
+let ReasoningCard = (p: { item: Extract<AssistantLiveStateItem, { type: 'reasoning' }> }) => {
+  let preview = getReasoningPreview(p.item.text);
+  let hasContent = p.item.status == 'running' || !!preview;
+
+  return (
+    <ToolDisclosureCard
+      summary={p.item.status == 'running' ? 'Thinking' : 'Thought'}
+      secondaryText={preview}
+      status={p.item.status}
+      defaultOpen={p.item.status == 'running'}
+      autoCollapseOnComplete={true}
+    >
+      {hasContent ? (
+        p.item.status == 'running' ? (
+          <TextShimmer>{p.item.text || 'Thinking...'}</TextShimmer>
+        ) : (
+          <MarkdownWrapper>
+            <ReactMarkdown
+              remarkPlugins={markdownRemarkPlugins}
+              rehypePlugins={markdownRehypePlugins}
+              components={markdownComponents}
+            >
+              {p.item.text}
+            </ReactMarkdown>
+          </MarkdownWrapper>
+        )
+      ) : undefined}
+    </ToolDisclosureCard>
+  );
+};
+
+let CompactionCard = (p: {
+  item: Extract<AssistantLiveStateItem, { type: 'compaction' }>;
+}) => {
+  return (
+    <ToolSurfaceCard>
+      <ToolHeader>
+        <ToolHeaderMain>
+          <ToolTitle>Compaction</ToolTitle>
+          <ToolDetail>{p.item.summary ?? 'Compressing conversation history.'}</ToolDetail>
+        </ToolHeaderMain>
+        {p.item.status != 'completed' ? (
+          <ToolStatusBadge data-status={p.item.status}>
+            {getStatusLabel(p.item.status)}
+          </ToolStatusBadge>
+        ) : null}
+      </ToolHeader>
+    </ToolSurfaceCard>
+  );
+};
+
+export let AssistantStateItemCard = (p: {
+  item: AssistantLiveStateItem;
+  message?: AssistantConversationMessage;
+  messageMeta?: AssistantTranscriptMessageMeta;
+  isLive?: boolean;
+  isEditing?: boolean;
+  editingValue?: string;
+  isSubmittingEdit?: boolean;
+  onStartEdit?: (message: AssistantConversationMessage) => void;
+  onEditingChange?: (value: string) => void;
+  onCancelEdit?: () => void;
+  onSubmitEdit?: () => void;
+  onSelectReferenceMessage?: (messageId: string) => void;
+}) => {
+  if (p.item.type == 'message') {
+    return (
+      <MessageCard
+        item={p.item}
+        message={p.message}
+        messageMeta={p.messageMeta}
+        isLive={p.isLive}
+        isEditing={p.isEditing}
+        editingValue={p.editingValue}
+        isSubmittingEdit={p.isSubmittingEdit}
+        onStartEdit={p.onStartEdit}
+        onEditingChange={p.onEditingChange}
+        onCancelEdit={p.onCancelEdit}
+        onSubmitEdit={p.onSubmitEdit}
+        onSelectReferenceMessage={p.onSelectReferenceMessage}
+      />
+    );
+  }
+
+  if (p.item.type == 'reasoning') {
+    return <ReasoningCard item={p.item} />;
+  }
+
+  if (p.item.type == 'files/write') {
+    return <EditToolCard item={p.item} />;
+  }
+
+  if (p.item.type == 'shell') {
+    return <BashToolCard item={p.item} />;
+  }
+
+  if (p.item.type == 'files/explore') {
+    return <SearchToolCard item={p.item} />;
+  }
+
+  if (p.item.type == 'web') {
+    return <WebToolCard item={p.item} />;
+  }
+
+  if (p.item.type == 'tool') {
+    return <McpToolCard item={p.item} />;
+  }
+
+  if (p.item.type == 'error') {
+    return <Error>{p.item.error.message}</Error>;
+  }
+
+  if (p.item.type == 'compaction') {
+    return <CompactionCard item={p.item} />;
+  }
+
+  return null;
+};

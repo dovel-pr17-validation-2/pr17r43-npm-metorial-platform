@@ -1,0 +1,13 @@
+[install]
+minimumReleaseAge = 604800
+minimumReleaseAgeExcludes = [
+  "@codemirror/view",
+  "resend",
+  "@slates/proto",
+  "@slates/provider-handler",
+  "@slates/adapter",
+  "@slates/adapter-chat",
+  "@slates/provider",
+  "@metorial/util-resource-mapper",
+]
+linker = "hoisted"

@@ -1,0 +1,58 @@
+enum AppMode {
+  standard
+  horizon
+}
+
+model App {
+  oid BigInt @id
+  id  String @unique
+
+  clientId String  @unique
+  slug     String? @unique
+
+  mode AppMode @default(standard)
+
+  hasTerms Boolean @default(true)
+
+  isSessionless    Boolean @default(false)
+  disableEmailAuth Boolean @default(false)
+
+  defaultRedirectUrl String
+  redirectDomains    String[] @default([])
+
+  defaultTenantOid BigInt?
+  defaultTenant    Tenant? @relation(fields: [defaultTenantOid], references: [oid], onDelete: SetNull, name: "DefaultTenant")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  tenants                Tenant[]
+  users                  User[]
+  authIntents            AuthIntent[]
+  authAttempts           AuthAttempt[]
+  authDeviceUserSessions AuthDeviceUserSession[]
+  emailDomains           EmailDomain[]
+  userEmails             UserEmail[]
+  oauthProviders         AppOAuthProvider[]
+  accounts               Account[]
+  accountDomains         AccountDomain[]
+  ssoTenants             SsoTenant[]
+  auditLogs              AuditLog[]
+  accessGroups           AccessGroup[]
+  accessGroupAssignments AccessGroupAssignment[]
+  ssoScimOperations      SsoScimOperation[]
+  importedSsoDelegations SsoImportedDelegation[]
+}
+
+model SyncListener {
+  oid BigInt @id
+  id  String @unique
+
+  identifier  String   @unique
+  callbackUrl String
+  secret      String
+  eventTypes  String[] @default(["user.changed"])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+}

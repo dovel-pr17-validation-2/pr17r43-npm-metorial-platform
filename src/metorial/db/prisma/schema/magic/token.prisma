@@ -1,0 +1,70 @@
+enum MagicMcpTokenStatus {
+  active
+  deleted
+}
+
+model MagicMcpToken {
+  oid BigInt @id @default(autoincrement())
+  id  String @unique
+
+  status MagicMcpTokenStatus
+
+  isGroupLocked        Boolean @default(false)
+  isConsumerReconciled Boolean @default(false)
+
+  secret String @unique
+
+  name        String?
+  description String?
+  metadata    Json
+
+  instanceOid BigInt
+  instance    Instance @relation(fields: [instanceOid], references: [oid], onDelete: Cascade)
+
+  magicMcpServerOid BigInt?
+  magicMcpServer    MagicMcpServer? @relation(fields: [magicMcpServerOid], references: [oid], onDelete: Cascade)
+
+  magicMcpEndpointOid BigInt?
+  magicMcpEndpoint    MagicMcpEndpoint? @relation(fields: [magicMcpEndpointOid], references: [oid], onDelete: Cascade)
+
+  skillPluginOid BigInt?
+  skillPlugin    SkillPlugin? @relation(fields: [skillPluginOid], references: [oid], onDelete: SetNull)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @default(now()) @updatedAt
+  deletedAt DateTime?
+  expiresAt DateTime?
+
+  groups               MagicMcpGroupToken[]
+  uses                 MagicMcpTokenUse[]
+  accessTagEntities    AccessTagEntity[]
+  consumerTokens       ConsumerToken[]
+  consumerAuthAttempts ConsumerAuthAttempt[]
+}
+
+model MagicMcpTokenUse {
+  oid BigInt @id @default(autoincrement())
+
+  magicMcpTokenOid BigInt
+  magicMcpToken    MagicMcpToken @relation(fields: [magicMcpTokenOid], references: [oid], onDelete: Cascade)
+
+  magicMcpServerOid BigInt?
+  magicMcpServer    MagicMcpServer? @relation(fields: [magicMcpServerOid], references: [oid], onDelete: SetNull)
+
+  magicMcpEndpointOid BigInt?
+  magicMcpEndpoint    MagicMcpEndpoint? @relation(fields: [magicMcpEndpointOid], references: [oid], onDelete: SetNull)
+
+  magicMcpTarget String
+
+  ip String
+  ua String @default("")
+
+  hour DateTime
+
+  createdAt DateTime @default(now())
+
+  @@unique([magicMcpTokenOid, magicMcpTarget, ip, ua, hour])
+  @@index([magicMcpServerOid])
+  @@index([magicMcpEndpointOid])
+  @@index([hour])
+}

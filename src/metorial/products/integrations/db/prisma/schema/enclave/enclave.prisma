@@ -1,0 +1,79 @@
+enum IntegrationEnclaveEnvironmentType {
+  metorial
+  outpost
+
+  @@map("EnclaveEnvironmentType")
+}
+
+model IntegrationEnclaveEnvironment {
+  oid BigInt @id
+  id  String @unique
+
+  name String
+
+  type IntegrationEnclaveEnvironmentType
+
+  systemIdentifier String? @unique
+
+  tenantOid BigInt
+  tenant    Tenant @relation(fields: [tenantOid], references: [oid])
+
+  projectOid BigInt?
+  project    Project? @relation(fields: [projectOid], references: [oid])
+
+  createdAt DateTime @default(now())
+
+  enclaves IntegrationEnclave[]
+
+  @@index([projectOid])
+  @@map("EnclaveEnvironment")
+}
+
+model IntegrationEnclave {
+  oid BigInt @id
+  id  String @unique
+
+  slug        String
+  name        String
+  description String?
+
+  hasFunctionBayBacking Boolean @default(false)
+
+  /// [CompiledNetworkRules]
+  compiledNetworkRules Json?
+
+  needsEnclaveReconciliation Boolean @default(true)
+
+  enclaveEnvironmentOid BigInt
+  enclaveEnvironment    IntegrationEnclaveEnvironment @relation(fields: [enclaveEnvironmentOid], references: [oid], onDelete: Cascade)
+
+  providerDeploymentOid BigInt             @unique
+  providerDeployment    ProviderDeployment @relation(fields: [providerDeploymentOid], references: [oid])
+
+  internetGatewayOid BigInt                     @map("networkOid")
+  internetGateway    IntegrationInternetGateway @relation(fields: [internetGatewayOid], references: [oid], onDelete: Cascade)
+
+  tenantOid BigInt
+  tenant    Tenant @relation(fields: [tenantOid], references: [oid])
+
+  projectOid BigInt?
+  project    Project? @relation(fields: [projectOid], references: [oid])
+
+  environmentOid BigInt
+  environment    Environment @relation(fields: [environmentOid], references: [oid], onDelete: Cascade)
+
+  instanceOid BigInt?
+  instance    Instance? @relation(fields: [instanceOid], references: [oid])
+
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  lastUsedAt DateTime?
+
+  firewallAssignments IntegrationFirewallAssignment[]
+
+  @@unique([environmentOid, slug])
+  @@index([needsEnclaveReconciliation])
+  @@index([projectOid])
+  @@index([instanceOid])
+  @@map("Enclave")
+}

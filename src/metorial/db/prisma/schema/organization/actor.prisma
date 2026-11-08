@@ -1,0 +1,57 @@
+enum OrganizationActorType {
+  member
+  machine_access
+  system
+  oauth_application
+  agent
+  consumer_profile
+}
+
+model OrganizationActor {
+  oid BigInt @id @default(autoincrement())
+  id  String @unique
+
+  type OrganizationActorType
+
+  isSystem Boolean?
+
+  email String?
+  name  String
+
+  /// [EntityImage]
+  image Json
+
+  organizationOid BigInt
+  organization    Organization @relation(fields: [organizationOid], references: [oid], onDelete: Cascade)
+
+  internalActorIdentifier String?
+  cargoActorId            String?
+  subspaceActorId         String?
+  synthesisActorId        String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  member                     OrganizationMember?
+  consumerProfile            ConsumerProfile?
+  createdInvites             OrganizationInvite[]
+  machineAccess              MachineAccess[]
+  secretEvents               SecretEvent[]
+  profileUpdates             ProfileUpdate[]
+  accessLimiters             AccessLimiter[]
+  teams                      TeamMember[]
+  oauthInstallations         OAuthInstallation[]
+  projectBrandUpdates        ProjectBrandUpdate[]
+  consumers                  Consumer[]
+  instanceConsumers          InstanceConsumer[]
+  consumerInvites            ConsumerInvite[]
+  createdSkills              Skill[]
+  sandboxes                  Sandbox[]
+  environments               Environment[]
+  resourceActors             ResourceActor[]
+  consumerOrganizationActors ConsumerOrganizationActor[]
+  auditLogs                  AuditLog[]
+  events                     AuditLogEvent[]
+
+  @@unique([isSystem, organizationOid])
+}

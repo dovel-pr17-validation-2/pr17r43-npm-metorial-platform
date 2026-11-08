@@ -1,0 +1,227 @@
+import { renderWithLoader } from '@metorial/data-hooks';
+import { DetailsOverviewLayout } from '@metorial/details-layout';
+import { Paths } from '@metorial/frontend-config';
+import {
+  useCurrentInstance,
+  useIntegrations,
+  useMagicMcpServers,
+  useProvider,
+  useProviderListing
+} from '@metorial/state';
+import { Button, Spacer, Text } from '@metorial/ui';
+import { Box, ID, Table } from '@metorial/ui-product';
+import { Link, useNavigate, useParams } from 'react-router-dom';
+import { OpenExplorerBox } from '../../components/openExplorer';
+import { UsageOverviewTiles } from '../../scenes/instanceUsage';
+import { showCreateIntegrationProviderFirstFlow } from '../../scenes/integrations/providerPanelFlow';
+import { showMagicMcpServerCreateFlow } from '../../scenes/providerDeployments/magicMcpForm';
+import { Skills } from './components/skills';
+
+export let ProviderOverviewPage = () => {
+  let instance = useCurrentInstance();
+  let navigate = useNavigate();
+
+  let { providerId } = useParams();
+  let provider = useProvider(instance.data?.id, providerId);
+
+  let listing = useProviderListing(instance.data?.id, providerId);
+  let providerFilterQuery = providerId
+    ? `?providerId=${encodeURIComponent(provider.data?.id ?? providerId)}`
+    : '';
+  let integrations = useIntegrations(
+    instance.data?.id && providerId ? instance.data.id : null,
+    {
+      providerId: provider.data?.id ?? providerId,
+      status: ['active'],
+      limit: 15,
+      order: 'desc'
+    }
+  );
+  let magicMcpServers = useMagicMcpServers(
+    instance.data?.id && providerId ? instance.data.id : null,
+    {
+      providerId: provider.data?.id ?? providerId,
+      ownership: 'all',
+      status: ['active'],
+      limit: 15,
+      order: 'desc'
+    }
+  );
+
+  return renderWithLoader({ provider })(({ provider }) => (
+    <DetailsOverviewLayout>
+      <OpenExplorerBox
+        title="Test this provider"
+        description="Use the Metorial Explorer to test this provider."
+        to={Paths.instance.explorer(
+          instance.data?.organization,
+          instance.data?.project,
+          instance.data,
+          { provider_id: provider.data?.id }
+        )}
+      />
+
+      <Spacer height={15} />
+
+      <UsageOverviewTiles
+        filter={{ providerId: provider.data.id }}
+        tiles={['tool_calls', 'error_rate', 'sessions']}
+        href={Paths.instance.provider(
+          instance.data?.organization,
+          instance.data?.project,
+          instance.data,
+          provider.data.slug,
+          'usage'
+        )}
+      />
+
+      <Spacer height={15} />
+
+      {listing.data?.skills && listing.data.skills.length > 0 && (
+        <>
+          <Skills skills={listing.data.skills} />
+          <Spacer height={15} />
+        </>
+      )}
+
+      <Box
+        title="Integrations"
+        description="Integrations that include this provider."
+        rightActions={
+          <div style={{ display: 'flex', gap: 8 }}>
+            <Button
+              size="1"
+              onClick={() =>
+                providerId &&
+                showCreateIntegrationProviderFirstFlow({
+                  providerId,
+                  onCreate: integration => {
+                    navigate(
+                      Paths.instance.integration(
+                        instance.data?.organization,
+                        instance.data?.project,
+                        instance.data,
+                        integration.id
+                      )
+                    );
+                  }
+                })
+              }
+            >
+              Create Integration
+            </Button>
+            <Link
+              to={`${Paths.instance.integrations(
+                instance.data?.organization,
+                instance.data?.project,
+                instance.data
+              )}${providerFilterQuery}`}
+            >
+              <Button as="span" size="1" variant="outline">
+                View All
+              </Button>
+            </Link>
+          </div>
+        }
+      >
+        {integrations.isLoading ? (
+          <Text size="2" color="gray600">
+            Loading integrations...
+          </Text>
+        ) : integrations.data?.items.length ? (
+          <Table
+            headers={['Name', 'Status', 'ID']}
+            data={integrations.data.items.map(integration => ({
+              href: Paths.instance.integration(
+                instance.data?.organization,
+                instance.data?.project,
+                instance.data,
+                integration.id
+              ),
+              data: [
+                <Text size="2" weight="strong">
+                  {integration.name}
+                </Text>,
+                <Text size="2">{integration.status}</Text>,
+                <Text size="2">
+                  <ID id={integration.id} />
+                </Text>
+              ]
+            }))}
+          />
+        ) : (
+          <Text size="2" color="gray600">
+            No integrations found for this provider.
+          </Text>
+        )}
+      </Box>
+
+      <Spacer height={15} />
+
+      <Box
+        title="Magic MCP Servers"
+        description="Magic MCP servers that include this provider."
+        rightActions={
+          <div style={{ display: 'flex', gap: 8 }}>
+            <Button
+              size="1"
+              onClick={() =>
+                instance.data &&
+                providerId &&
+                showMagicMcpServerCreateFlow({
+                  instanceId: instance.data.id,
+                  providerId
+                })
+              }
+            >
+              Create Magic MCP Server
+            </Button>
+            <Link
+              to={`${Paths.instance.magicMcp.servers(
+                instance.data?.organization,
+                instance.data?.project,
+                instance.data
+              )}${providerFilterQuery}`}
+            >
+              <Button as="span" size="1" variant="outline">
+                View All
+              </Button>
+            </Link>
+          </div>
+        }
+      >
+        {magicMcpServers.isLoading ? (
+          <Text size="2" color="gray600">
+            Loading Magic MCP servers...
+          </Text>
+        ) : magicMcpServers.data?.items.length ? (
+          <Table
+            headers={['Name', 'Alias', 'Status', 'ID']}
+            data={magicMcpServers.data.items.map(server => ({
+              href: Paths.instance.magicMcp.server(
+                instance.data?.organization,
+                instance.data?.project,
+                instance.data,
+                server.id
+              ),
+              data: [
+                <Text size="2" weight="strong">
+                  {server.name ?? 'Unknown Server'}
+                </Text>,
+                <Text size="2">{server.endpoints[0]?.alias ?? '-'}</Text>,
+                <Text size="2">{server.status}</Text>,
+                <Text size="2">
+                  <ID id={server.id} />
+                </Text>
+              ]
+            }))}
+          />
+        ) : (
+          <Text size="2" color="gray600">
+            No Magic MCP servers found for this provider.
+          </Text>
+        )}
+      </Box>
+    </DetailsOverviewLayout>
+  ));
+};

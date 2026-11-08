@@ -1,0 +1,264 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+let mocks = vi.hoisted(() => {
+  let redisInstances: Array<{ quit: ReturnType<typeof vi.fn> }> = [];
+  let acquire = vi.fn();
+  let quit = vi.fn(async () => {});
+
+  return { redisInstances, acquire, quit };
+});
+
+vi.mock('ioredis', () => ({
+  Redis: class {
+    setnx = vi.fn();
+    expire = vi.fn();
+    set = vi.fn();
+    get = vi.fn();
+    quit = vi.fn(async () => {});
+
+    constructor() {
+      mocks.redisInstances.push(this);
+    }
+  }
+}));
+
+vi.mock('redlock', () => ({
+  default: class {
+    acquire = mocks.acquire;
+    quit = mocks.quit;
+  }
+}));
+
+import { closeLockPool, createLock, LockAcquisitionError } from './index';
+
+let createFakeLease = (durationMs: number) => {
+  let lease: any = {
+    expiration: Date.now() + durationMs,
+    extend: vi.fn(async (nextDurationMs: number) => {
+      lease.expiration = Date.now() + nextDurationMs;
+      return lease;
+    }),
+    release: vi.fn(async () => {})
+  };
+  return lease;
+};
+
+describe('lock pooling and acquisition', () => {
+  beforeEach(async () => {
+    await closeLockPool();
+    mocks.redisInstances.length = 0;
+    mocks.acquire.mockReset();
+    mocks.quit.mockClear();
+  });
+
+  afterEach(async () => {
+    vi.useRealTimers();
+    await closeLockPool();
+  });
+
+  it('shares one Redis client between locks using the same URL', () => {
+    for (let i = 0; i < 500; i++) {
+      createLock({ name: `lock-${i}`, redisUrl: 'redis://localhost:6379/0' });
+    }
+
+    expect(mocks.redisInstances).toHaveLength(1);
+  });
+
+  it('keeps the Redis pool across module reloads', async () => {
+    for (let i = 0; i < 250; i++) {
+      createLock({ name: `before-reload-${i}`, redisUrl: 'redis://localhost:6379/0' });
+    }
+
+    vi.resetModules();
+    let reloadedLockModule = await vi.importActual<typeof import('./index')>('./index');
+    for (let i = 0; i < 250; i++) {
+      reloadedLockModule.createLock({
+        name: `after-reload-${i}`,
+        redisUrl: 'redis://localhost:6379/0'
+      });
+    }
+
+    expect(mocks.redisInstances).toHaveLength(1);
+  });
+
+  it('bounds an in-flight Redis acquisition and releases a lease arriving after the deadline', async () => {
+    vi.useFakeTimers();
+    let resolveAcquisition!: (lease: any) => void;
+    mocks.acquire.mockImplementationOnce(
+      () =>
+        new Promise(resolve => {
+          resolveAcquisition = resolve;
+        })
+    );
+    let lock = createLock({ name: 'deadline', redisUrl: 'redis://localhost:6379/0' });
+    let run = vi.fn();
+    let result = lock
+      .usingLock('resource', run, { acquisitionTimeoutMs: 100 })
+      .catch(error => error);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await result).toBeInstanceOf(LockAcquisitionError);
+    expect(((await result) as LockAcquisitionError).detail).toMatchObject({
+      name: 'deadline',
+      attempts: 1,
+      elapsedMs: 100
+    });
+    expect(run).not.toHaveBeenCalled();
+    let lease = createFakeLease(10000);
+    resolveAcquisition(lease);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(lease.release).toHaveBeenCalledOnce();
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('uses fresh acquisition attempts so waiting does not consume the lease', async () => {
+    vi.useFakeTimers();
+    mocks.acquire
+      .mockRejectedValueOnce(new Error('locked'))
+      .mockRejectedValueOnce(new Error('locked'))
+      .mockRejectedValueOnce(new Error('locked'))
+      .mockImplementationOnce(async (_keys, durationMs) => createFakeLease(durationMs));
+
+    let lock = createLock({ name: 'contended', redisUrl: 'redis://localhost:6379/0' });
+    let remainingLeaseMs = 0;
+    let resultPromise = lock.usingLock(
+      'resource',
+      async () => {
+        let lease = await mocks.acquire.mock.results.at(-1)!.value;
+        remainingLeaseMs = lease.expiration - Date.now();
+        return 'ok';
+      },
+      {
+        durationMs: 10_000,
+        acquisitionTimeoutMs: 5_000,
+        retryDelay: 1_000,
+        retryJitter: 0
+      }
+    );
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    await expect(resultPromise).resolves.toBe('ok');
+    expect(remainingLeaseMs).toBeGreaterThanOrEqual(9_900);
+    expect(mocks.acquire).toHaveBeenCalledTimes(4);
+    expect(mocks.acquire).toHaveBeenCalledWith(expect.any(Array), 10_000, {
+      retryCount: 0
+    });
+  });
+
+  it('bounds acquisition by acquisitionTimeoutMs', async () => {
+    vi.useFakeTimers();
+    mocks.acquire.mockRejectedValue(new Error('locked'));
+
+    let lock = createLock({ name: 'bounded', redisUrl: 'redis://localhost:6379/0' });
+    let resultPromise = lock.usingLock('resource', async () => 'never', {
+      acquisitionTimeoutMs: 2_500,
+      retryDelay: 1_000,
+      retryJitter: 0
+    });
+
+    let assertion = expect(resultPromise).rejects.toMatchObject({
+      name: 'LockAcquisitionError',
+      message: 'locked',
+      cause: expect.objectContaining({ message: 'locked' })
+    });
+    await vi.advanceTimersByTimeAsync(2_500);
+    await assertion;
+    expect(mocks.acquire).toHaveBeenCalledTimes(3);
+  });
+
+  it('exposes acquisition failures separately from critical-section failures', async () => {
+    mocks.acquire.mockRejectedValueOnce(new Error('redis unavailable'));
+
+    let lock = createLock({ name: 'classified', redisUrl: 'redis://localhost:6379/0' });
+    await expect(
+      lock.usingLock('resource', async () => 'never', {
+        acquisitionTimeoutMs: 0
+      })
+    ).rejects.toBeInstanceOf(LockAcquisitionError);
+
+    let criticalSectionError = new Error('critical section failed');
+    mocks.acquire.mockResolvedValueOnce(createFakeLease(10_000));
+    await expect(
+      lock.usingLock('resource', async () => {
+        throw criticalSectionError;
+      })
+    ).rejects.toBe(criticalSectionError);
+  });
+
+  describe('contention classification', () => {
+    let createExecutionError = (votesAgainst: Error[]) => {
+      let error: any = new Error(
+        'The operation was unable to achieve a quorum during its retry window.'
+      );
+      error.name = 'ExecutionError';
+      error.attempts = [
+        Promise.resolve({
+          votesAgainst: new Map(votesAgainst.map((vote, index) => [index, vote]))
+        })
+      ];
+      return error;
+    };
+
+    let createNamedError = (name: string) => {
+      let error = new Error(name);
+      error.name = name;
+      return error;
+    };
+
+    let acquireFailure = async (failure: Error) => {
+      mocks.acquire.mockRejectedValue(failure);
+
+      let lock = createLock({ name: 'classify', redisUrl: 'redis://localhost:6379/0' });
+      return (await lock
+        .usingLock('resource', async () => 'never', { acquisitionTimeoutMs: 0 })
+        .catch(error => error)) as LockAcquisitionError;
+    };
+
+    it('flags a quorum failure caused by a held lock as contention', async () => {
+      let error = await acquireFailure(
+        createExecutionError([createNamedError('ResourceLockedError')])
+      );
+
+      expect(error).toBeInstanceOf(LockAcquisitionError);
+      expect(error.isContention).toBe(true);
+    });
+
+    it('does not flag a quorum failure caused by Redis errors as contention', async () => {
+      let error = await acquireFailure(
+        createExecutionError([
+          createNamedError('ResourceLockedError'),
+          new Error('connection closed')
+        ])
+      );
+
+      expect(error.isContention).toBe(false);
+    });
+
+    it('does not flag a quorum failure whose attempt stats never settle as contention', async () => {
+      let hanging: any = createExecutionError([createNamedError('ResourceLockedError')]);
+      hanging.attempts = [new Promise(() => {})];
+
+      let error = await acquireFailure(hanging);
+
+      expect(error.isContention).toBe(false);
+    });
+
+    it('does not flag unrelated acquisition errors as contention', async () => {
+      let error = await acquireFailure(new Error('redis unavailable'));
+
+      expect(error.isContention).toBe(false);
+    });
+
+    it('flags an exceeded acquisition deadline as contention', async () => {
+      vi.useFakeTimers();
+      mocks.acquire.mockImplementation(() => new Promise(() => {}));
+
+      let lock = createLock({ name: 'deadline', redisUrl: 'redis://localhost:6379/0' });
+      let result = lock
+        .usingLock('resource', async () => 'never', { acquisitionTimeoutMs: 100 })
+        .catch(error => error);
+      await vi.advanceTimersByTimeAsync(100);
+
+      expect(((await result) as LockAcquisitionError).isContention).toBe(true);
+    });
+  });
+});

@@ -1,0 +1,21 @@
+{
+  "name": "metorial-dev-tools",
+  "module": "index.ts",
+  "type": "module",
+  "version": "1.0.0",
+  "private": true,
+  "bin": "./src/cli.ts",
+  "scripts": {
+    "test": "bun test e2e"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "fs-extra": "^11.4.1",
+    "sade": "^1.8.1"
+  }
+}

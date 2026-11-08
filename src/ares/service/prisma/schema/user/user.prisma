@@ -1,0 +1,97 @@
+enum UserType {
+  user
+  system
+}
+
+enum UserOwner {
+  self
+  tenant
+}
+
+enum UserStatus {
+  active
+  deleted
+}
+
+enum UserSignupMethod {
+  unknown
+  email
+  oauth
+  sso
+}
+
+model User {
+  oid BigInt @id
+  id  String @unique
+
+  type   UserType
+  owner  UserOwner
+  status UserStatus
+
+  tenantOid BigInt
+  tenant    Tenant @relation(fields: [tenantOid], references: [oid])
+
+  appOid BigInt
+  app    App    @relation(fields: [appOid], references: [oid])
+
+  accountOid BigInt?
+  account    Account? @relation(fields: [accountOid], references: [oid], onDelete: SetNull)
+
+  email     String
+  name      String
+  firstName String
+  lastName  String
+
+  /// [EntityImage]
+  image Json
+
+  isFullyCreated Boolean @default(true)
+
+  // The defaults describe rows that predate these columns. Writers that create a user
+  // without witnessing a login -- projections, SCIM -- pass `unknown` and `false`.
+  signupMethod UserSignupMethod @default(email)
+  hasLoggedIn  Boolean          @default(true)
+
+  syncRevision       BigInt  @default(0)
+  hyperplaneRevision BigInt?
+
+  lastLoginAt  DateTime?
+  lastActiveAt DateTime?
+  deletedAt    DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @default(now()) @updatedAt
+
+  authIntents            AuthIntent[]
+  authAttempts           AuthAttempt[]
+  authDeviceUserSessions AuthDeviceUserSession[]
+  userEmails             UserEmail[]
+  userEmailVerifications UserEmailVerification[]
+  userIdentities         UserIdentity[]
+  userTermsAgreements    UserTermsAgreement[]
+  auditLogs              AuditLog[]
+  password               UserPassword?
+
+  twoFactorRevision Int @default(0)
+
+  twoFactors      UserTwoFactor[]
+  twoFactorSetups UserTwoFactorSetup[]
+  recoveryCodes   UserRecoveryCode[]
+
+  @@unique([appOid, email])
+  @@index([accountOid, id])
+  @@index([appOid, email])
+}
+
+model UserPassword {
+  oid BigInt @id
+  id  String @unique
+
+  userOid BigInt @unique
+  user    User   @relation(fields: [userOid], references: [oid], onDelete: Cascade)
+
+  hash    String
+  version String @default(dbgenerated("(gen_random_uuid())::text"))
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+}

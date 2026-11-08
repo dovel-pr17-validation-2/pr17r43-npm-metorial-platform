@@ -1,0 +1,216 @@
+import { describe, expect, it } from 'bun:test';
+import JSZip from 'jszip';
+import { readZipEntries } from '../slatePackage/archive';
+import { normalizeSlatePackage } from '../slatePackage/manifest';
+import { getPreferredCurrentSlateVersion } from './current';
+import { getSlateVersionPromotion } from './promotion';
+import {
+  buildChangeNotificationSupportsPrebuiltWhere,
+  buildSlateSupportsPrebuiltWhere
+} from './visibility';
+
+let createZipArchive = async (files: Record<string, string>) => {
+  let zip = new JSZip();
+
+  for (let [path, content] of Object.entries(files)) {
+    zip.file(path, content);
+  }
+
+  return Buffer.from(await zip.generateAsync({ type: 'nodebuffer' }));
+};
+
+describe('registry slate version helpers', () => {
+  it('reads the published version from package.json in zip uploads', async () => {
+    let zipBuffer = await createZipArchive({
+      'package.json': JSON.stringify({
+        name: '@npm/weather-package',
+        version: '1.2.3',
+        description: 'Weather slate'
+      }),
+      'slate.json': JSON.stringify({
+        name: '@demo/weather',
+        categories: ['utilities'],
+        skills: ['forecast'],
+        logoUrl: 'https://example.com/logo.png',
+        networkIsolation: true,
+        timeout: 60
+      }),
+      'docs/guide.md': '# Guide',
+      'README.md': '# Readme'
+    });
+
+    let entries = await readZipEntries(zipBuffer);
+    let slatePackage = normalizeSlatePackage({
+      entries,
+      identifier: {
+        scopeIdentifier: 'demo',
+        slateIdentifier: 'weather'
+      }
+    });
+
+    expect(slatePackage.manifest).toEqual({
+      name: '@demo/weather',
+      version: '1.2.3',
+      description: 'Weather slate',
+      categories: ['utilities'],
+      skills: ['forecast'],
+      logoUrl: 'https://example.com/logo.png',
+      networkIsolation: true,
+      timeout: 60
+    });
+    expect(slatePackage.docsFiles.map(file => file.path).sort()).toEqual([
+      'README.md',
+      'docs/guide.md'
+    ]);
+  });
+
+  it('detects local prebuilt packages from dist/ entries', async () => {
+    let zipBuffer = await createZipArchive({
+      'package.json': JSON.stringify({
+        name: '@npm/weather-package',
+        version: '1.0.0'
+      }),
+      'slate.json': JSON.stringify({
+        name: '@demo/weather'
+      }),
+      'dist/index.js': 'export default {}',
+      'docs/guide.md': '# Guide'
+    });
+
+    let entries = await readZipEntries(zipBuffer);
+    let slatePackage = normalizeSlatePackage({
+      entries,
+      identifier: {
+        scopeIdentifier: 'demo',
+        slateIdentifier: 'weather'
+      }
+    });
+
+    expect(slatePackage.isPrebuilt).toBe(true);
+  });
+
+  it('treats packages without dist/ as unbuilt', async () => {
+    let zipBuffer = await createZipArchive({
+      'package.json': JSON.stringify({
+        name: '@npm/weather-package',
+        version: '1.0.0'
+      }),
+      'slate.json': JSON.stringify({
+        name: '@demo/weather'
+      }),
+      'src/index.ts': 'export default {}',
+      'docs/guide.md': '# Guide'
+    });
+
+    let entries = await readZipEntries(zipBuffer);
+    let slatePackage = normalizeSlatePackage({
+      entries,
+      identifier: {
+        scopeIdentifier: 'demo',
+        slateIdentifier: 'weather'
+      }
+    });
+
+    expect(slatePackage.isPrebuilt).toBe(false);
+  });
+
+  it('lets local built versions advance only the built-or-unbuilt current pointer', () => {
+    let promotion = getSlateVersionPromotion({
+      backend: 'local_built',
+      version: '2.5.0',
+      unbuiltCurrentVersion: '2.0.0',
+      builtOrUnbuiltCurrentVersion: '3.0.0'
+    });
+
+    expect(promotion).toEqual({
+      shouldSetUnbuiltCurrentVersion: false,
+      shouldSetBuiltOrUnbuiltCurrentVersion: false
+    });
+  });
+
+  it('lets local unbuilt versions advance only the unbuilt current pointer', () => {
+    let promotion = getSlateVersionPromotion({
+      backend: 'local_unbuilt',
+      version: '2.5.0',
+      unbuiltCurrentVersion: '2.0.0',
+      builtOrUnbuiltCurrentVersion: '3.0.0'
+    });
+
+    expect(promotion).toEqual({
+      shouldSetUnbuiltCurrentVersion: true,
+      shouldSetBuiltOrUnbuiltCurrentVersion: false
+    });
+  });
+
+  it('indexes older npm versions without making them current', () => {
+    let promotion = getSlateVersionPromotion({
+      backend: 'npm',
+      version: '2.5.0',
+      unbuiltCurrentVersion: '2.0.0',
+      builtOrUnbuiltCurrentVersion: '3.0.0'
+    });
+
+    expect(promotion).toEqual({
+      shouldSetUnbuiltCurrentVersion: false,
+      shouldSetBuiltOrUnbuiltCurrentVersion: false
+    });
+  });
+
+  it('marks newly published local built versions as current', () => {
+    let promotion = getSlateVersionPromotion({
+      backend: 'local_built',
+      version: '1.0.0',
+      unbuiltCurrentVersion: null,
+      builtOrUnbuiltCurrentVersion: null
+    });
+
+    expect(promotion).toEqual({
+      shouldSetUnbuiltCurrentVersion: false,
+      shouldSetBuiltOrUnbuiltCurrentVersion: true
+    });
+  });
+
+  it('prefers whichever current version is newer when built is supported', () => {
+    let selected = getPreferredCurrentSlateVersion({
+      supportsBuilt: true,
+      unbuiltCurrentVersion: {
+        id: 'unbuilt',
+        version: '2.0.0',
+        createdAt: new Date('2026-01-01')
+      },
+      builtOrUnbuiltCurrentVersion: {
+        id: 'built',
+        version: '3.0.0',
+        createdAt: new Date('2026-01-02')
+      }
+    });
+
+    expect(selected?.id).toBe('built');
+  });
+
+  it('allows prebuilt-only slates when prebuilt support is enabled', () => {
+    expect(buildSlateSupportsPrebuiltWhere(true)).toEqual({
+      OR: [
+        { unbuiltCurrentVersionOid: { not: null } },
+        { builtOrUnbuiltCurrentVersionOid: { not: null } }
+      ]
+    });
+  });
+
+  it('requires an unbuilt current version when prebuilt support is disabled', () => {
+    expect(buildSlateSupportsPrebuiltWhere(false)).toEqual({
+      unbuiltCurrentVersionOid: { not: null }
+    });
+  });
+
+  it('includes local built notifications only for visible slates when prebuilt is enabled', () => {
+    expect(buildChangeNotificationSupportsPrebuiltWhere(true)).toEqual({
+      slate: {
+        OR: [
+          { unbuiltCurrentVersionOid: { not: null } },
+          { builtOrUnbuiltCurrentVersionOid: { not: null } }
+        ]
+      }
+    });
+  });
+});

@@ -1,0 +1,131 @@
+import {
+  archivedCleanupFindArgs,
+  archivedCleanupWhere,
+  archivedCleanupWorkerOpts,
+  createArchivedCleanupScan
+} from '@metorial-subspace/archived-cleanup';
+import { createQueue } from '@lowerdeck/queue';
+import { db } from '@metorial-subspace/db';
+import { getBackend } from '@metorial-subspace/provider';
+import { env } from '../../env';
+import { providerAuthConfigDeletedQueue } from '../lifecycle/providerAuthConfig';
+
+let providerAuthConfigArchivedCleanup = createArchivedCleanupScan({
+  cronName: 'sub/auth/cron/providerAuthConfigArchivedCleanup',
+  cron: '0 0 * * *',
+  manyQueueName: 'sub/auth/delete/providerAuthConfig/many',
+  redisUrl: env.service.REDIS_URL,
+  findArchived: ({ cursor, take }) =>
+    db.providerAuthConfig.findMany({
+      where: archivedCleanupWhere({ cursor }),
+      ...archivedCleanupFindArgs({ cursor, take })
+    }),
+  enqueue: ids => providerAuthConfigDeleteQueue.addMany(ids.map(id => ({ providerAuthConfigId: id })))
+});
+
+export let providerAuthConfigArchivedCleanupCron = providerAuthConfigArchivedCleanup.cron;
+export let providerAuthConfigDeleteManyQueue = providerAuthConfigArchivedCleanup.manyQueue;
+export let providerAuthConfigDeleteManyQueueProcessor = providerAuthConfigArchivedCleanup.manyProcessor;
+
+export let providerAuthConfigDeleteQueue = createQueue<{ providerAuthConfigId: string }>({
+  name: 'sub/auth/delete/providerAuthConfig',
+  redisUrl: env.service.REDIS_URL,
+  workerOpts: archivedCleanupWorkerOpts()
+});
+
+export let providerAuthConfigBackendDeleteQueue = createQueue<{
+  tenantOid: string;
+  backendOid: string;
+  slateAuthConfigOid?: string | null;
+  shuttleAuthConfigOid?: string | null;
+}>({
+  name: 'sub/auth/delete/providerAuthConfig/backend',
+  redisUrl: env.service.REDIS_URL
+});
+
+export let providerAuthConfigBackendDeleteQueueProcessor =
+  providerAuthConfigBackendDeleteQueue.process(async data => {
+    let tenant = await db.tenant.findUnique({
+      where: { oid: BigInt(data.tenantOid) }
+    });
+    if (!tenant) return;
+
+    let backend = await getBackend({
+      entity: { backendOid: BigInt(data.backendOid) }
+    });
+
+    await backend.auth.deleteProviderAuthConfig({
+      tenant,
+      backing: {
+        slateAuthConfigOid: data.slateAuthConfigOid ? BigInt(data.slateAuthConfigOid) : null,
+        shuttleAuthConfigOid: data.shuttleAuthConfigOid
+          ? BigInt(data.shuttleAuthConfigOid)
+          : null
+      }
+    });
+  });
+
+export let providerAuthConfigDeleteQueueProcessor = providerAuthConfigDeleteQueue.process(
+  async data => {
+    let authConfig = await db.providerAuthConfig.findUnique({
+      where: { id: data.providerAuthConfigId },
+      include: {
+        tenant: true,
+        currentVersion: true
+      }
+    });
+    if (!authConfig || authConfig.status !== 'archived') return;
+
+    await providerAuthConfigBackendDeleteQueue.add({
+      tenantOid: authConfig.tenant.oid.toString(),
+      backendOid: authConfig.backendOid.toString(),
+      slateAuthConfigOid: authConfig.currentVersion?.slateAuthConfigOid?.toString() ?? null,
+      shuttleAuthConfigOid: authConfig.currentVersion?.shuttleAuthConfigOid?.toString() ?? null
+    });
+
+    await db.sessionProvider.updateMany({
+      where: { authConfigOid: authConfig.oid },
+      data: { status: 'deleted', isParentDeleted: true }
+    });
+
+    await db.sessionTemplateProvider.updateMany({
+      where: { authConfigOid: authConfig.oid },
+      data: { status: 'deleted' }
+    });
+
+    await db.identityCredential.updateMany({
+      where: { authConfigOid: authConfig.oid },
+      data: { status: 'archived', archivedAt: new Date() }
+    });
+
+    await db.providerDeployment.updateMany({
+      where: { defaultAuthConfigOid: authConfig.oid },
+      data: { defaultAuthConfigOid: null }
+    });
+
+    await db.providerAuthConfigVersion.updateMany({
+      where: { authConfigOid: authConfig.oid },
+      data: {
+        slateAuthConfigOid: null,
+        shuttleAuthConfigOid: null,
+        authCredentialsOid: null
+      }
+    });
+
+    await db.providerAuthConfig.updateMany({
+      where: { oid: authConfig.oid },
+      data: {
+        status: 'deleted',
+        isDefault: false,
+        name: '[deleted]',
+        description: null,
+        metadata: {},
+        authCredentialsOid: null
+      }
+    });
+
+    await providerAuthConfigDeletedQueue.add({
+      providerAuthConfigId: authConfig.id
+    });
+  }
+);

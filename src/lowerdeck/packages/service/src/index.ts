@@ -1,0 +1,95 @@
+import {
+  hasActiveSpan,
+  isTelemetryEnabled,
+  SpanStatusCode,
+  trace
+} from '@lowerdeck/telemetry';
+
+export type GetServiceControllerMethodClient<Method extends (...args: any[]) => any> = (
+  ...args: Parameters<Method>
+) => Promise<Awaited<ReturnType<Method>>>;
+
+export type GetServiceControllerClient<Obj extends object> = {
+  [K in keyof Obj]: Obj[K] extends (...args: any[]) => any
+    ? GetServiceControllerMethodClient<Obj[K]>
+    : never;
+};
+
+export class Service<Methods extends object> {
+  #methods: Methods;
+
+  private constructor(
+    private readonly id: string,
+    object: () => Methods
+  ) {
+    this.#methods = object();
+  }
+
+  static create<Methods extends object>(id: string, object: () => Methods) {
+    return new Service(id, object);
+  }
+
+  build() {
+    // return this.#methods;
+
+    let tracer = trace.getTracer(`mt.service.${this.id}`);
+
+    let methods: Record<string, any> = {};
+    let self = this;
+
+    let prototype = Object.getPrototypeOf(this.#methods);
+    let ownProperties = Object.getOwnPropertyNames(this.#methods);
+    let prototypeProperties =
+      prototype && prototype !== Object.prototype ? Object.getOwnPropertyNames(prototype) : [];
+    let properties = [...new Set([...ownProperties, ...prototypeProperties])];
+
+    for (let methodName of properties) {
+      if (methodName === 'constructor') continue;
+
+      let method = (this.#methods as any)[methodName];
+
+      if (typeof method == 'function') {
+        methods[methodName] = function () {
+          let args = Array.from(arguments);
+
+          if (!isTelemetryEnabled() || !hasActiveSpan()) {
+            return method.apply(self.#methods, args);
+          }
+
+          return tracer.startActiveSpan(`${self.id}.${methodName}`, span => {
+            let fail = (error: unknown) => {
+              span.setStatus({
+                code: SpanStatusCode.ERROR,
+                message: error instanceof Error ? error.message : String(error)
+              });
+              span.end();
+              throw error;
+            };
+
+            try {
+              let result = method.apply(self.#methods, args);
+              if (result != null && typeof result.then === 'function') {
+                return Promise.resolve(result).then(
+                  value => {
+                    span.end();
+                    return value;
+                  },
+                  fail
+                );
+              }
+
+              span.end();
+              return result;
+            } catch (error) {
+              fail(error);
+            }
+          });
+        };
+      } else {
+        methods[methodName] = method;
+      }
+    }
+
+    return methods as Methods;
+  }
+}

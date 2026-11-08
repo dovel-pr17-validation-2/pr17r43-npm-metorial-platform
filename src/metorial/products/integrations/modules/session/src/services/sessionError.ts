@@ -1,0 +1,239 @@
+import { notFoundError, ServiceError } from '@lowerdeck/error';
+import { Paginator } from '@lowerdeck/pagination';
+import { Service } from '@lowerdeck/service';
+import {
+  db,
+  type Environment,
+  type Prisma,
+  type SessionErrorType,
+  type Solution,
+  type Tenant
+} from '@metorial-subspace/db';
+import {
+  type DateFilter,
+  mergeRetentionWithDateFilter,
+  normalizeDateFilter,
+  normalizeStatusForGet,
+  normalizeStatusForList,
+  resolveProviderRuns,
+  resolveProviders,
+  resolveSessionConnections,
+  resolveSessionErrorGroups,
+  resolveSessionMessages,
+  resolveSessionProviders,
+  resolveSessions
+} from '@metorial-subspace/list-utils';
+import { getProviderTenantFilter } from '@metorial-subspace/module-catalog';
+import { searchRelatedEntities, whenRelatedMatched } from '@metorial-subspace/module-search';
+import {
+  getMetorialSolution,
+  type MetorialFacing,
+  resolveMetorialFacing
+} from '@metorial-subspace/module-tenant';
+import { narrowSessionIdFilter } from '../lib/fineGrainedSessionFilter';
+import {
+  assertSessionVisible,
+  getSessionVisibilityWhere,
+  type SessionVisibilityWhere
+} from '../lib/sessionVisibility';
+
+let include = {
+  session: true,
+  group: true,
+  providerRun: true,
+  connection: true
+};
+export let sessionErrorInclude = include;
+
+export type ListSessionErrorsParams = {
+  types?: SessionErrorType[];
+  allowDeleted?: boolean;
+  includeInternal?: boolean;
+
+  ids?: string[];
+  sessionIds?: string[];
+  accessTagSessionIds?: string[];
+  sessionProviderIds?: string[];
+  sessionConnectionIds?: string[];
+  providerRunIds?: string[];
+  providerIds?: string[];
+  sessionMessageIds?: string[];
+  sessionErrorGroupIds?: string[];
+  createdAt?: DateFilter;
+  updatedAt?: DateFilter;
+
+  search?: string;
+};
+
+export type GetSessionErrorByIdParams = {
+  sessionErrorId: string;
+  allowDeleted?: boolean;
+};
+
+class sessionErrorServiceImpl {
+  async listSessionErrors(d: MetorialFacing<ListSessionErrorsParams>) {
+    let { instance, organizationActor, accessTagSessionIds, ...rest } = d;
+    let scope = await resolveMetorialFacing(d);
+
+    let sessionIds = narrowSessionIdFilter({
+      allowedSessionIds: accessTagSessionIds,
+      requestedSessionIds: rest.sessionIds
+    });
+
+    return this.listSessionErrorsInternal({
+      ...rest,
+      sessionIds,
+      tenant: scope.tenant,
+      environment: scope.environment,
+      sessionVisibility: await getSessionVisibilityWhere({
+        tenant: scope.tenant,
+        organizationActor
+      })
+    });
+  }
+
+  async listSessionErrorsInternal(
+    d: {
+      tenant: Tenant;
+      environment: Environment;
+      sessionVisibility?: SessionVisibilityWhere;
+    } & Omit<ListSessionErrorsParams, 'accessTagSessionIds'>
+  ) {
+    let solution = await getMetorialSolution();
+    let ts = { tenant: d.tenant, environment: d.environment, solution };
+
+    let sessions = await resolveSessions(ts, d.sessionIds);
+    let sessionProviders = await resolveSessionProviders(ts, d.sessionProviderIds);
+    let connections = await resolveSessionConnections(ts, d.sessionConnectionIds);
+    let providerRuns = await resolveProviderRuns(ts, d.providerRunIds);
+    let messages = await resolveSessionMessages(ts, d.sessionMessageIds);
+    let groups = await resolveSessionErrorGroups(ts, d.sessionErrorGroupIds);
+    let providers = await resolveProviders(ts, d.providerIds);
+
+    let searchFilter = await this.buildSessionErrorSearchFilter({ ...d, solution });
+
+    return Paginator.create(({ prisma }) =>
+      prisma(
+        async opts =>
+          await db.sessionError.findMany({
+            ...opts,
+            where: {
+              tenantOid: d.tenant.oid,
+              solutionOid: solution.oid,
+              environmentOid: d.environment.oid,
+
+              ...normalizeStatusForList(d).onlyParent,
+
+              AND: [
+                d.sessionVisibility ? { session: d.sessionVisibility } : undefined!,
+                !d.includeInternal && !d.sessionIds?.length
+                  ? { session: { isInternal: false } }
+                  : undefined!,
+                d.ids ? { id: { in: d.ids } } : undefined!,
+                d.types ? { type: { in: d.types } } : undefined!,
+
+                sessions ? { sessionOid: sessions.in } : undefined!,
+                sessionProviders
+                  ? { providerRun: { sessionProviderOid: sessionProviders.in } }
+                  : undefined!,
+                connections ? { connectionOid: connections.in } : undefined!,
+                providerRuns ? { providerRunOid: providerRuns.in } : undefined!,
+                groups ? { groupOid: groups.in } : undefined!,
+                messages ? { sessionMessages: { some: { oid: messages.in } } } : undefined!,
+                providers ? { providerRun: { providerOid: providers.in } } : undefined!,
+
+                searchFilter!,
+
+                mergeRetentionWithDateFilter(d.tenant, d.createdAt),
+                d.updatedAt ? { updatedAt: normalizeDateFilter(d.updatedAt) } : undefined!
+              ].filter(Boolean)
+            },
+            include
+          })
+      )
+    );
+  }
+
+  private async buildSessionErrorSearchFilter(d: {
+    tenant: Tenant;
+    environment: Environment;
+    solution: Solution;
+    search?: string;
+  }): Promise<Prisma.SessionErrorWhereInput | undefined> {
+    let search = d.search?.trim();
+    if (!search) return undefined;
+
+    let related = await searchRelatedEntities({
+      tenant: d.tenant,
+      query: search,
+      kinds: ['providerOids', 'deploymentOids', 'authConfigOids'],
+      providerFilter: getProviderTenantFilter({ ...d, includeDeprecated: true })
+    });
+
+    let sessionProviderClauses: Prisma.SessionProviderWhereInput[] = [
+      ...whenRelatedMatched(related.deploymentOids, oids => ({ deploymentOid: oids })),
+      ...whenRelatedMatched(related.authConfigOids, oids => ({ authConfigOid: oids }))
+    ];
+
+    return {
+      OR: [
+        { id: search },
+        { code: search },
+        ...whenRelatedMatched(related.providerOids, oids => ({
+          providerRun: { providerOid: oids }
+        })),
+        ...(sessionProviderClauses.length
+          ? [{ session: { providers: { some: { OR: sessionProviderClauses } } } }]
+          : [])
+      ]
+    };
+  }
+
+  async getSessionErrorById(d: MetorialFacing<GetSessionErrorByIdParams>) {
+    let { instance, organizationActor, ...rest } = d;
+    let scope = await resolveMetorialFacing(d);
+
+    let item = await this.getSessionErrorByIdInternal({
+      ...rest,
+      tenant: scope.tenant,
+      environment: scope.environment
+    });
+
+    await assertSessionVisible({
+      tenant: scope.tenant,
+      organizationActor,
+      sessionOid: item.sessionOid,
+      resource: 'session_error',
+      id: d.sessionErrorId
+    });
+
+    return item;
+  }
+
+  async getSessionErrorByIdInternal(
+    d: { tenant: Tenant; environment: Environment } & GetSessionErrorByIdParams
+  ) {
+    let solution = await getMetorialSolution();
+
+    let sessionError = await db.sessionError.findFirst({
+      where: {
+        id: d.sessionErrorId,
+        tenantOid: d.tenant.oid,
+        solutionOid: solution.oid,
+        environmentOid: d.environment.oid,
+        ...normalizeStatusForGet(d).onlyParent,
+        ...mergeRetentionWithDateFilter(d.tenant)
+      },
+      include
+    });
+    if (!sessionError)
+      throw new ServiceError(notFoundError('session.error', d.sessionErrorId));
+
+    return sessionError;
+  }
+}
+
+export let sessionErrorService = Service.create(
+  'sessionError',
+  () => new sessionErrorServiceImpl()
+).build();

@@ -1,0 +1,125 @@
+import { createQueue, QueueRetryError } from '@lowerdeck/queue';
+import {
+  db,
+  getId,
+  type ProviderVersionSpecificationDiscoveryStatus
+} from '@metorial-subspace/db';
+import { schemaChangeNotificationAlertIngestQueue } from '@metorial-subspace/module-monitor/src/queues/schemaChange';
+import { env } from '../../env';
+import { markDiscoveryFinished } from '../../lib/discoverySignal';
+
+export let providerVersionSetSpecificationQueue = createQueue<{
+  versionOid: bigint;
+  result:
+    | {
+        status: 'success';
+        specificationOid: bigint;
+        source: 'version' | 'pair';
+      }
+    | {
+        status: 'not_discoverable';
+      }
+    | {
+        status: 'waiting_for_pair';
+      };
+}>({
+  name: 'sub/pint/pver/spec/set',
+  workerOpts: { concurrency: 50 },
+  redisUrl: env.service.REDIS_URL
+});
+
+export let providerVersionSetSpecificationQueueProcessor =
+  providerVersionSetSpecificationQueue.process(async data => {
+    let version = await db.providerVersion.findFirst({
+      where: { oid: data.versionOid }
+    });
+    if (!version) throw new QueueRetryError();
+    let previousSpecificationOid = version.specificationOid;
+
+    let result: {
+      specificationDiscoveryStatus: ProviderVersionSpecificationDiscoveryStatus;
+      specificationOid: bigint | null;
+    };
+
+    if (data.result.status === 'success') {
+      result = {
+        specificationDiscoveryStatus: 'discovered',
+        specificationOid: data.result.specificationOid
+      };
+    } else {
+      result = {
+        specificationDiscoveryStatus: data.result.status,
+        specificationOid: version.specificationOid
+      };
+    }
+
+    version = await db.providerVersion.update({
+      where: { oid: version.oid },
+      data: result
+    });
+
+    await markDiscoveryFinished({
+      kind: 'providerVersion',
+      oid: version.oid,
+      status: version.specificationDiscoveryStatus
+    });
+
+    if (previousSpecificationOid !== version.specificationOid) {
+      await Promise.all([
+        db.providerAuthConfig.updateMany({
+          where: {
+            providerOid: version.providerOid,
+            status: { not: 'deleted' }
+          },
+          data: { needsScopeSync: true }
+        }),
+        db.providerAuthCredentials.updateMany({
+          where: {
+            providerOid: version.providerOid,
+            status: { not: 'deleted' }
+          },
+          data: { needsScopeSync: true }
+        })
+      ]);
+    }
+
+    if (version.specificationOid && version.previousVersionOid) {
+      let previousVersion = await db.providerVersion.findFirstOrThrow({
+        where: { oid: version.previousVersionOid }
+      });
+
+      if (
+        version.specificationOid !== previousVersion.specificationOid &&
+        previousVersion.specificationOid
+      ) {
+        try {
+          let change = await db.providerVersionSpecificationChange.create({
+            data: {
+              ...getId('providerVersionSpecificationChange'),
+
+              toSpecificationOid: version.specificationOid,
+              fromSpecificationOid: previousVersion.specificationOid,
+
+              toVersionOid: version.oid,
+              fromVersionOid: previousVersion.oid
+            }
+          });
+          let notification = await db.providerSpecificationChangeNotification.create({
+            data: {
+              ...getId('providerSpecificationChangeNotification'),
+
+              target: 'version',
+              versionOid: version.oid,
+              versionSpecificationChangeOid: change.oid
+            }
+          });
+
+          await schemaChangeNotificationAlertIngestQueue.add({
+            notificationId: notification.id
+          });
+        } catch (e) {
+          // Maybe a duplicate
+        }
+      }
+    }
+  });

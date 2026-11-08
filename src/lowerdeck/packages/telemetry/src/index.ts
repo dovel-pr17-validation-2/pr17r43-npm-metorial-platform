@@ -1,0 +1,233 @@
+import {
+  context as otelContext,
+  diag,
+  DiagConsoleLogger,
+  DiagLogLevel,
+  propagation,
+  SpanStatusCode,
+  trace
+} from '@opentelemetry/api';
+import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
+import {
+  CompositePropagator,
+  suppressTracing,
+  W3CBaggagePropagator,
+  W3CTraceContextPropagator
+} from '@opentelemetry/core';
+import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
+import { registerInstrumentations } from '@opentelemetry/instrumentation';
+import { resourceFromAttributes } from '@opentelemetry/resources';
+import {
+  AlwaysOffSampler,
+  BatchSpanProcessor,
+  ParentBasedSampler,
+  TraceIdRatioBasedSampler,
+  TracerProvider
+} from '@opentelemetry/sdk-trace';
+import type { ReadableSpan, SpanProcessor } from '@opentelemetry/sdk-trace';
+import { ATTR_SERVICE_NAME } from '@opentelemetry/semantic-conventions';
+import { PrismaInstrumentation } from '@prisma/instrumentation';
+import {
+  withExecutionContextOptional,
+  withExecutionTraceContext
+} from '@lowerdeck/execution-context';
+
+let initialized = false;
+const DEPLOYMENT_ENVIRONMENT_RESOURCE_ATTRIBUTE = 'deployment.environment.name' as const;
+
+let parseKeyValuePairs = (value: string | undefined): Record<string, string> => {
+  if (!value?.trim()) return {};
+  let parsed: Record<string, string> = {};
+
+  for (let pair of value.split(',')) {
+    let separator = pair.indexOf('=');
+    if (separator <= 0) continue;
+
+    let key = pair.slice(0, separator).trim();
+    let value = pair.slice(separator + 1).trim();
+
+    if (!key) continue;
+    parsed[key] = value;
+  }
+
+  return parsed;
+};
+
+let parseHeaders = (headers: string | undefined): Record<string, string> | undefined => {
+  let parsed = parseKeyValuePairs(headers);
+  return Object.keys(parsed).length ? parsed : undefined;
+};
+
+let parseResourceAttributes = (attrs: string | undefined): Record<string, string> =>
+  parseKeyValuePairs(attrs);
+
+let getTraceSampleRate = () => {
+  let configuredRate = Number(process.env.OTEL_TRACES_SAMPLER_ARG);
+
+  if (Number.isFinite(configuredRate) && configuredRate >= 0 && configuredRate <= 1) {
+    return configuredRate;
+  }
+
+  return 0.01;
+};
+
+let getPrismaSpanMinDurationMs = () => {
+  let configuredDuration = Number(process.env.OTEL_PRISMA_SPAN_MIN_DURATION_MS);
+
+  if (Number.isFinite(configuredDuration) && configuredDuration >= 0) {
+    return configuredDuration;
+  }
+
+  return 100;
+};
+
+let getSpanDurationMs = (span: ReadableSpan) => {
+  let [seconds, nanoseconds] = span.duration;
+
+  return seconds * 1000 + nanoseconds / 1_000_000;
+};
+
+// Prisma ends failed operations without setting SpanStatusCode.ERROR, recording
+// the failure via recordException instead, so status alone misses fast failures.
+let hasSpanError = (span: ReadableSpan) => {
+  if (span.status.code === SpanStatusCode.ERROR) return true;
+
+  if (span.events.some(event => event.name === 'exception')) return true;
+
+  return span.attributes['error'] === true || 'exception.type' in span.attributes;
+};
+
+export let shouldDropSpan = (span: ReadableSpan, prismaSpanMinDurationMs: number) => {
+  if (!span.name.startsWith('prisma:')) return false;
+
+  if (hasSpanError(span)) return false;
+
+  return getSpanDurationMs(span) < prismaSpanMinDurationMs;
+};
+
+let createFilteringSpanProcessor = (
+  delegate: SpanProcessor,
+  prismaSpanMinDurationMs: number
+): SpanProcessor => ({
+  onStart: (span, parentContext) => delegate.onStart(span, parentContext),
+
+  onEnd: span => {
+    if (shouldDropSpan(span, prismaSpanMinDurationMs)) return;
+
+    delegate.onEnd(span);
+  },
+
+  shutdown: () => delegate.shutdown(),
+
+  forceFlush: () => delegate.forceFlush()
+});
+
+export {
+  context as otelContext,
+  propagation,
+  SpanKind,
+  SpanStatusCode,
+  trace
+} from '@opentelemetry/api';
+
+export let isTelemetryEnabled = () =>
+  typeof process !== 'undefined' && process.env?.['OTEL_ENABLED'] === 'true';
+
+export let hasActiveSpan = () => !!trace.getSpan(otelContext.active());
+
+export let hasActiveTraceContext = () => !!trace.getSpanContext(otelContext.active());
+
+export let withTracingSuppressed = async <T>(cb: () => Promise<T>): Promise<T> => {
+  let suppressedContext = suppressTracing(otelContext.active());
+  return await otelContext.with(suppressedContext, cb);
+};
+
+export let withExecutionContextTraceFallback = async <T>(cb: () => Promise<T>): Promise<T> => {
+  if (!isTelemetryEnabled()) {
+    return await cb();
+  }
+
+  if (hasActiveTraceContext()) {
+    return await cb();
+  }
+
+  return await withExecutionContextOptional(async executionContext => {
+    if (!executionContext) {
+      return await withTracingSuppressed(cb);
+    }
+
+    return await withExecutionTraceContext(executionContext, async () => {
+      if (hasActiveTraceContext()) {
+        return await cb();
+      }
+
+      return await withTracingSuppressed(cb);
+    });
+  });
+};
+
+export let initTelemetry = (opts: { serviceName: string; allowRootSpans?: boolean }) => {
+  if (initialized) return;
+
+  let endpoint = process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT?.trim();
+  if (process.env.OTEL_ENABLED !== 'true' || !endpoint) return;
+
+  if (process.env.OTEL_DEBUG === 'true') {
+    diag.setLogger(new DiagConsoleLogger(), DiagLogLevel.INFO);
+  }
+
+  let serviceName = process.env.OTEL_SERVICE_NAME?.trim() || opts.serviceName;
+  let extraResourceAttributes = parseResourceAttributes(process.env.OTEL_RESOURCE_ATTRIBUTES);
+  let allowRootSpans =
+    opts.allowRootSpans === true || process.env.OTEL_ALLOW_ROOT_SPANS === 'true';
+  let traceSampleRate = getTraceSampleRate();
+  let prismaSpanMinDurationMs = getPrismaSpanMinDurationMs();
+
+  let provider = new TracerProvider({
+    resource: resourceFromAttributes({
+      [ATTR_SERVICE_NAME]: serviceName,
+      [DEPLOYMENT_ENVIRONMENT_RESOURCE_ATTRIBUTE]:
+        process.env.METORIAL_ENV ?? process.env.NODE_ENV ?? 'development',
+      ...extraResourceAttributes
+    }),
+    sampler: new ParentBasedSampler({
+      root: allowRootSpans
+        ? new TraceIdRatioBasedSampler(traceSampleRate)
+        : new AlwaysOffSampler()
+    }),
+    spanProcessors: [
+      createFilteringSpanProcessor(
+        new BatchSpanProcessor({
+          exporter: new OTLPTraceExporter({
+            url: endpoint,
+            headers: parseHeaders(process.env.OTEL_EXPORTER_OTLP_HEADERS)
+          })
+        }),
+        prismaSpanMinDurationMs
+      )
+    ]
+  });
+
+  trace.setGlobalTracerProvider(provider);
+  otelContext.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
+  propagation.setGlobalPropagator(
+    new CompositePropagator({
+      propagators: [new W3CTraceContextPropagator(), new W3CBaggagePropagator()]
+    })
+  );
+
+  registerInstrumentations({
+    tracerProvider: provider,
+    instrumentations: [
+      new PrismaInstrumentation({
+        ignoreSpanTypes: [/^prisma:engine:/]
+      })
+    ]
+  });
+
+  initialized = true;
+
+  console.log(
+    `[otel] initialized for ${serviceName} -> ${endpoint} (allowRootSpans=${allowRootSpans}, traceSampleRate=${traceSampleRate}, prismaSpanMinDurationMs=${prismaSpanMinDurationMs})`
+  );
+};

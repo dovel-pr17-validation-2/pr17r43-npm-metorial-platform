@@ -1,0 +1,112 @@
+import { createIdGenerator, idType } from '@lowerdeck/id';
+import { Snowflake } from '@lowerdeck/snowflake';
+
+export let ID = createIdGenerator({
+  app: idType.sorted('ssap_'),
+  tenant: idType.sorted('atn_'),
+
+  app_clientId: idType.key('app_client_'),
+  tenant_clientId: idType.key('ten_client_'),
+
+  account: idType.sorted('acc_'),
+  account_clientId: idType.key('account_'),
+  accountDomain: idType.sorted('acd_'),
+  accountDomainSsoTenant: idType.sorted('adt_'),
+  accountDomainSsoConnection: idType.sorted('adc_'),
+
+  authIntent: idType.sorted('ain_'),
+  authIntentStep: idType.sorted('ast_'),
+  authIntentCode: idType.sorted('aic_'),
+  authIntentVerificationAttempt: idType.sorted('ava_'),
+  authAttempt: idType.sorted('aat_'),
+  authDevice: idType.sorted('adv_'),
+  authDeviceUserSession: idType.sorted('ads_'),
+
+  user: idType.sorted('usr_'),
+  userPassword: idType.sorted('upw_'),
+  userTwoFactor: idType.sorted('u2f_'),
+  userTwoFactorSetup: idType.sorted('u2s_'),
+  userRecoveryCode: idType.sorted('urc_'),
+  userTwoFactorSetup_secret: idType.key('two_factor_setup_'),
+  userEmail: idType.sorted('ume_'),
+  userEmailVerification: idType.sorted('uev_'),
+  userIdentity: idType.sorted('uid_'),
+  userTermsAgreement: idType.sorted('utag_'),
+  userTermsType: idType.sorted('utt_'),
+
+  admin: idType.sorted('adm_'),
+  adminSession: idType.sorted('asm_'),
+
+  oauthProvider: idType.sorted('oap_'),
+  userIdentityProvider: idType.sorted('uip_'),
+  syncListener: idType.sorted('usl_'),
+
+  emailDomain: idType.sorted('emd_'),
+
+  ssoTenant: idType.sorted('stn_'),
+  ssoTenant_clientId: idType.key('sso_tenant_'),
+  ssoConnection: idType.sorted('scn_'),
+  ssoConnectionSetup: idType.sorted('scs_'),
+  ssoConnectionSetup_clientSecret: idType.key('sso_setup_'),
+  ssoDirectory: idType.sorted('sdr_'),
+  ssoDirectoryGroup: idType.sorted('sdg_'),
+  ssoDirectoryRole: idType.sorted('sdrt_'),
+  ssoScimOperation: idType.sorted('sop_'),
+  ssoGroup: idType.sorted('sgr_'),
+  ssoRole: idType.sorted('sro_'),
+  ssoConnectionGroup: idType.sorted('ssg_'),
+  ssoConnectionRole: idType.sorted('ssr_'),
+  ssoUserGroup: idType.sorted('sug_'),
+  ssoUserRole: idType.sorted('sur_'),
+  ssoUserProfileGroup: idType.sorted('spg_'),
+  ssoUserProfileRole: idType.sorted('spr_'),
+  ssoDirectoryUserProfile: idType.sorted('sdu_'),
+  ssoUser: idType.sorted('ssu_'),
+  ssoUserChange: idType.sorted('such_'),
+  ssoUserProfile: idType.sorted('sup_'),
+  ssoAuth: idType.sorted('sau_'),
+  ssoAuth_clientSecret: idType.key('sso_auth_'),
+  ssoTest: idType.sorted('sst_'),
+  aresInstance: idType.sorted('ari_'),
+  remoteAresInstance: idType.sorted('rai_'),
+  ssoExportedDelegation: idType.sorted('sed_'),
+  ssoExportedDelegation_clientId: idType.key('sso_del_client_'),
+  ssoExportedDelegation_clientSecret: idType.key('sso_del_secret_'),
+  ssoImportedDelegation: idType.sorted('sid_'),
+  ssoDelegationAuthRequest: idType.sorted('sda_'),
+  ssoDelegationAuthorizationCode: idType.sorted('sdc_'),
+  ssoDelegationToken: idType.sorted('sdt_'),
+
+  appOAuthProvider: idType.sorted('aop_'),
+
+  sender: idType.sorted('ssn_'),
+
+  auditLog: idType.sorted('aud_'),
+
+  accessGroup: idType.sorted('acg_'),
+  accessGroupRule: idType.sorted('agr_'),
+  accessGroupAssignment: idType.sorted('aga_')
+});
+
+let workerIdBits = 12;
+let workerIdMask = (1 << workerIdBits) - 1;
+
+let workerId = (() => {
+  let array = new Uint16Array(1);
+  crypto.getRandomValues(array);
+  return array[0]! & workerIdMask;
+})();
+
+export let snowflake = new Snowflake({
+  workerId,
+  datacenterId: 0,
+  workerIdBits: workerIdBits,
+  datacenterIdBits: 0,
+  sequenceBits: 9,
+  epoch: new Date('2025-06-01T00:00:00Z')
+});
+
+export let getId = <K extends Parameters<typeof ID.generateIdSync>[0]>(model: K) => ({
+  oid: snowflake.nextId(),
+  id: ID.generateIdSync(model)
+});

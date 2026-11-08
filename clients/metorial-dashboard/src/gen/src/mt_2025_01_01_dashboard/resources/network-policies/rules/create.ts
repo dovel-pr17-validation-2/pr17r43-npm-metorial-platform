@@ -1,0 +1,35 @@
+import { createMapper } from '@metorial/util-resource-mapper/compact';
+
+export type NetworkPoliciesRulesCreateOutput = {
+  object: 'networking.network_policy.rule';
+  id: string;
+  effect: 'allow' | 'deny';
+  direction: 'ingress' | 'egress';
+  cidrs: string[];
+  description: string | null;
+  enabled: boolean;
+  priority: number;
+  ports:
+    | {
+        object: 'networking.network_policy.port_range';
+        from: number;
+        to: number;
+      }[]
+    | null;
+};
+
+export let mapNetworkPoliciesRulesCreateOutput =
+  /* @__PURE__ */ createMapper<NetworkPoliciesRulesCreateOutput>(0);
+
+export type NetworkPoliciesRulesCreateBody = {
+  effect: 'allow' | 'deny';
+  direction: 'ingress' | 'egress';
+  cidrs: string[];
+  description?: string | undefined;
+  enabled: boolean;
+  priority: number;
+  ports?: { from: number; to: number }[] | undefined;
+};
+
+export let mapNetworkPoliciesRulesCreateBody =
+  /* @__PURE__ */ createMapper<NetworkPoliciesRulesCreateBody>(0);

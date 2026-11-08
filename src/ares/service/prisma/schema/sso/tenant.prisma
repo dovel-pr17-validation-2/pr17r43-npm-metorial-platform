@@ -1,0 +1,59 @@
+enum SsoTenantStatus {
+  pending
+  completed
+  disabled
+}
+
+enum SsoTenantEnrollment {
+  app
+  account
+  disabled
+}
+
+model SsoTenant {
+  oid BigInt @id
+  id  String @unique
+
+  status SsoTenantStatus @default(pending)
+
+  clientId   String  @unique
+  name       String
+  externalId String? @unique
+
+  /// [JsonObject]
+  metadata Json?
+
+  enrollment SsoTenantEnrollment @default(app)
+  hideInUI   Boolean             @default(false)
+
+  appOid BigInt
+  app    App    @relation(fields: [appOid], references: [oid], onDelete: Cascade)
+
+  accountOid BigInt?
+  account    Account? @relation(fields: [accountOid], references: [oid], onDelete: Restrict)
+
+  importedDelegationOid BigInt?                @unique
+  importedDelegation    SsoImportedDelegation? @relation(fields: [importedDelegationOid], references: [oid], onDelete: Cascade)
+
+  syncRevision BigInt @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  connections      SsoConnection[]
+  connectionSetups SsoConnectionSetup[]
+  users            SsoUser[]
+  userChanges      SsoUserChange[]
+  userProfiles     SsoUserProfile[]
+  groups           SsoGroup[]
+  roles            SsoRole[]
+  auths            SsoAuth[]
+  tests            SsoTest[]
+
+  identityProvider      UserIdentityProvider?
+  allowedAccountDomains AccountDomainSsoTenant[]
+  exportedDelegations   SsoExportedDelegation[]
+
+  @@index([appOid, enrollment])
+  @@index([accountOid, status])
+}

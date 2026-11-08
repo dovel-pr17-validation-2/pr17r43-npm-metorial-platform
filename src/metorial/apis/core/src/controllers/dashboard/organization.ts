@@ -1,0 +1,131 @@
+import { Paginator } from '@lowerdeck/pagination';
+import { v } from '@lowerdeck/validation';
+import { organizationService } from '@metorial/module-organization';
+import { Controller, Path } from '@metorial/rest';
+import { checkAccess } from '../../middleware/checkAccess';
+import { isDashboardGroup } from '../../middleware/isDashboard';
+import { organizationGroup } from '../../middleware/organizationGroup';
+import { userGroup } from '../../middleware/userGroup';
+import { organizationPresenter } from '@metorial/presenters';
+
+export let dashboardOrganizationController = Controller.create(
+  {
+    name: 'Organization',
+    description: 'Read and write organization information'
+  },
+  {
+    create: userGroup
+      .use(isDashboardGroup())
+      .post(Path('/dashboard/organizations', 'dashboard.organizations.create'), {
+        name: 'Create organization',
+        description: 'Create a new organization'
+      })
+      .body(
+        'default',
+        v.object({
+          name: v.string()
+        })
+      )
+      .output(organizationPresenter)
+      .do(async ctx => {
+        let { organization } = await organizationService.createOrganization({
+          input: {
+            name: ctx.body.name
+          },
+          context: ctx.context,
+          performedBy: ctx.user
+        });
+
+        return organizationPresenter.present({ organization });
+      }),
+
+    list: userGroup
+      .use(isDashboardGroup())
+      .get(Path('/dashboard/organizations', 'dashboard.organizations.list'), {
+        name: 'List organizations',
+        description: 'List all organizations'
+      })
+      .query('default', Paginator.validate())
+      .outputList(organizationPresenter)
+      .do(async ctx => {
+        let paginator = await organizationService.listOrganizations({
+          filter: {
+            type: 'user',
+            user: ctx.user
+          }
+        });
+
+        let list = await paginator.run(ctx.query);
+
+        return Paginator.present(list, org =>
+          organizationPresenter.present({ organization: org })
+        );
+      }),
+
+    get: organizationGroup
+      .get(Path('/dashboard/organizations/:organizationId', 'dashboard.organizations.get'), {
+        name: 'Get organization',
+        description: 'Get the current organization information'
+      })
+      .output(organizationPresenter)
+      .use(
+        checkAccess({ possibleScopes: ['organization:read', 'consumer#organization:read'] })
+      )
+      .do(async ctx => {
+        return organizationPresenter.present({ organization: ctx.organization });
+      }),
+
+    update: organizationGroup
+      .use(isDashboardGroup())
+      .patch(
+        Path('/dashboard/organizations/:organizationId', 'dashboard.organizations.update'),
+        {
+          name: 'Update organization',
+          description: 'Update the current organization information'
+        }
+      )
+      .body(
+        'default',
+        v.object({
+          name: v.optional(v.string()),
+          image_file_id: v.optional(v.nullable(v.string())),
+          magic_mcp_origin: v.optional(v.nullable(v.string()))
+        })
+      )
+      .use(checkAccess({ possibleScopes: ['organization:write'] }))
+      .output(organizationPresenter)
+      .do(async ctx => {
+        let organization = await organizationService.updateOrganization({
+          input: {
+            name: ctx.body.name,
+            imageFileId: ctx.body.image_file_id,
+            magicMcpOrigin: ctx.body.magic_mcp_origin
+          },
+          organization: ctx.organization,
+          auditScope: ctx.auditScope
+        });
+
+        return organizationPresenter.present({ organization });
+      }),
+
+    delete: organizationGroup
+      .use(isDashboardGroup())
+      .delete(
+        Path('/dashboard/organizations/:organizationId', 'dashboard.organizations.delete'),
+        {
+          name: 'Delete organization',
+          description: 'Delete the current organization'
+        }
+      )
+      .use(checkAccess({ possibleScopes: ['organization:write'] }))
+      .output(organizationPresenter)
+      .do(async ctx => {
+        let organization = await organizationService.deleteOrganization({
+          organization: ctx.organization,
+          auditScope: ctx.auditScope
+        });
+
+        return organizationPresenter.present({ organization });
+      })
+  }
+);

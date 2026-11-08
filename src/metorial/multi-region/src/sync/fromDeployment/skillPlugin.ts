@@ -1,0 +1,119 @@
+import { createCron } from '@metorial/cron';
+import { addAfterTransactionHook, db } from '@metorial/db';
+import { Fabric } from '@metorial/fabric';
+import { createQueue, hourlyPacedDelay } from '@metorial/queue';
+import { cell } from '../../cell';
+import { globalDB } from '../../db';
+import { reconcileSkillPluginSlug } from '../skillPluginSlug';
+import { upsertOrganization } from './organization';
+
+let SYNC_PAGE_SIZE = 500;
+
+export let syncSkillPluginsCron = createCron(
+  {
+    name: 'global/sync/from-deployment/skill-plugin',
+    cron: process.env.NODE_ENV == 'production' ? '0 * * * *' : '* * * * *'
+  },
+  async () => {
+    await syncSkillPluginsManyQueue.add({});
+  }
+);
+
+let syncSkillPluginsManyQueue = createQueue<{ cursor?: string }>({
+  name: 'global/sync/from-deployment/skill-plugin-many',
+  workerOpts: { concurrency: 1 }
+});
+
+export let syncSkillPluginsManyQueueProcessor = syncSkillPluginsManyQueue.process(
+  async data => {
+    let skillPlugins = await db.skillPlugin.findMany({
+      where: {
+        id: { gt: data.cursor }
+      },
+      orderBy: { id: 'asc' },
+      take: SYNC_PAGE_SIZE,
+      select: { id: true }
+    });
+    if (skillPlugins.length == 0) return;
+
+    await syncSkillPluginSingleQueue.addMany(
+      skillPlugins.map(skillPlugin => ({ skillPluginId: skillPlugin.id }))
+    );
+
+    if (skillPlugins.length === SYNC_PAGE_SIZE) {
+      await syncSkillPluginsManyQueue.add(
+        { cursor: skillPlugins[skillPlugins.length - 1].id },
+        hourlyPacedDelay()
+      );
+    }
+  }
+);
+
+let syncSkillPluginSingleQueue = createQueue<{ skillPluginId: string }>({
+  name: 'global/sync/from-deployment/skill-plugin-single',
+  workerOpts: { concurrency: 5, limiter: { max: 10, duration: 1000 } }
+});
+
+export let syncSkillPluginSingleQueueProcessor = syncSkillPluginSingleQueue.process(
+  async data => {
+    let skillPlugin = await db.skillPlugin.findUnique({
+      where: { id: data.skillPluginId },
+      include: {
+        organization: {
+          select: {
+            id: true
+          }
+        },
+        instance: {
+          select: {
+            id: true
+          }
+        }
+      }
+    });
+    if (!skillPlugin) return;
+
+    await upsertOrganization(skillPlugin.organization.id);
+
+    let slug = await reconcileSkillPluginSlug(skillPlugin);
+
+    let inner = {
+      status: skillPlugin.status,
+      name: skillPlugin.name,
+      slug,
+      organizationId: skillPlugin.organization.id,
+      instanceId: skillPlugin.instance.id,
+      createdAt: skillPlugin.createdAt,
+      ownerOid: (await cell).oid
+    };
+
+    await globalDB.skillPlugin.upsert({
+      where: { id: skillPlugin.id },
+      update: inner,
+      create: {
+        id: skillPlugin.id,
+        ...inner
+      }
+    });
+  }
+);
+
+export let enqueueSkillPluginSync = async (skillPluginId: string) => {
+  await addAfterTransactionHook(() => syncSkillPluginSingleQueue.add({ skillPluginId }));
+};
+
+Fabric.listen('skill.plugin.created:after', async event => {
+  await enqueueSkillPluginSync(event.skillPlugin.id);
+});
+
+Fabric.listen('skill.plugin.updated:after', async event => {
+  await enqueueSkillPluginSync(event.skillPlugin.id);
+});
+
+Fabric.listen('skill.plugin.archived:after', async event => {
+  await enqueueSkillPluginSync(event.skillPlugin.id);
+});
+
+Fabric.listen('skill.plugin.deleted:after', async event => {
+  await enqueueSkillPluginSync(event.skillPlugin.id);
+});

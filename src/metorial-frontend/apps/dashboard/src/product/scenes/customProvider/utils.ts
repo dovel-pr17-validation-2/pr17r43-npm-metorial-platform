@@ -1,0 +1,198 @@
+import type {
+  CustomProvidersGetOutput,
+  DashboardInstanceCustomProvidersGetOutput,
+  DashboardInstanceCustomProvidersVersionsCreateBody
+} from '@metorial/dashboard-sdk';
+
+export type CustomProviderRemoteProtocol = 'sse' | 'streamable_http' | 'stateless';
+
+export let customProviderRemoteProtocolOptions: {
+  id: CustomProviderRemoteProtocol;
+  label: string;
+}[] = [
+  { id: 'streamable_http', label: 'Streamable HTTP' },
+  { id: 'stateless', label: 'Streamable HTTP (Stateless, MCP 2026-07-28)' },
+  { id: 'sse', label: 'SSE (Server-Sent Events)' }
+];
+
+export let customProviderRemoteProtocols = customProviderRemoteProtocolOptions.map(
+  option => option.id
+);
+
+export let getCustomProviderRemoteProtocolLabel = (protocol: string | null | undefined) =>
+  customProviderRemoteProtocolOptions.find(option => option.id === protocol)?.label ??
+  protocol ??
+  '';
+
+export let normalizeCustomProviderRemoteProtocol = (
+  protocol: string | null | undefined
+): CustomProviderRemoteProtocol =>
+  customProviderRemoteProtocols.find(option => option === protocol) ?? 'streamable_http';
+
+export let normalizeRepoPath = (path: string | null | undefined) => {
+  let trimmed = path?.trim();
+  return trimmed ? trimmed : undefined;
+};
+
+export let normalizeEnvRecord = (env: Record<string, any> | null | undefined) => {
+  let normalized: Record<string, string> = {};
+
+  for (let [key, value] of Object.entries(env ?? {})) {
+    let normalizedKey = key.trim();
+    if (!normalizedKey) continue;
+    normalized[normalizedKey] = String(value ?? '');
+  }
+
+  return normalized;
+};
+
+export let getFunctionProviderVersionFrom = (
+  customProvider: CustomProvidersGetOutput | DashboardInstanceCustomProvidersGetOutput,
+  env: Record<string, string>
+): DashboardInstanceCustomProvidersVersionsCreateBody['from'] => {
+  let linkedRepo = getCustomProviderLinkedRepo(customProvider);
+  let runtime = { identifier: 'nodejs' as const, version: '22.x' as const };
+
+  if (linkedRepo?.id) {
+    return {
+      type: 'function',
+      env,
+      runtime,
+      repository: {
+        repositoryId: linkedRepo.id,
+        branch: linkedRepo.defaultBranch || 'main',
+        path: normalizeRepoPath(linkedRepo.path)
+      }
+    };
+  }
+
+  return {
+    type: 'function',
+    files: [],
+    env,
+    runtime
+  };
+};
+
+export let getCustomProviderRedeployInput = (
+  customProvider: DashboardInstanceCustomProvidersGetOutput | null | undefined,
+  env: Record<string, string>
+): Pick<DashboardInstanceCustomProvidersVersionsCreateBody, 'from'> | null => {
+  if (!customProvider || customProvider.status === 'archived') return null;
+
+  if (customProvider.type === 'function') {
+    return {
+      from: getFunctionProviderVersionFrom(customProvider, env)
+    };
+  }
+
+  if (customProvider.type === 'container') {
+    let containerImage = customProvider.draft?.containerImage?.containerImage;
+    if (!containerImage) return null;
+
+    return {
+      from: {
+        type: 'container',
+        imageRef: containerImage
+      }
+    };
+  }
+
+  if (customProvider.type === 'remote') {
+    let remote = customProvider.draft.remoteMcpServer;
+    if (!remote) return null;
+
+    return {
+      from: {
+        type: 'remote',
+        remoteUrl: remote.url,
+        protocol: remote.transport
+      }
+    };
+  }
+
+  return null;
+};
+
+export let normalizeTrackedBranch = (branch: string | null | undefined) => {
+  let normalizedBranch = branch?.trim();
+  return normalizedBranch ? normalizedBranch : undefined;
+};
+
+export let getCustomProviderLinkedRepo = (
+  provider: DashboardInstanceCustomProvidersGetOutput | null | undefined
+) => {
+  let repository = provider?.scmRepo ?? provider?.draftBucket?.scmRepoLink?.repository;
+  if (!repository) return null;
+
+  return {
+    id: repository.id,
+    url: repository.url,
+    defaultBranch: repository.defaultBranch,
+    path: provider?.draftBucket?.scmRepoLink?.path ?? undefined
+  };
+};
+
+export let getCustomProviderScmLink = (
+  provider: DashboardInstanceCustomProvidersGetOutput | null | undefined
+) => {
+  let linkedRepo = getCustomProviderLinkedRepo(provider);
+  let repositoryUrl = linkedRepo?.url?.trim();
+  let branch = normalizeTrackedBranch(linkedRepo?.defaultBranch);
+
+  if (!repositoryUrl) return null;
+
+  return {
+    repositoryUrl,
+    branch
+  };
+};
+
+export let isCustomProviderScmBacked = (
+  provider: DashboardInstanceCustomProvidersGetOutput | null | undefined
+) => Boolean(provider?.scmRepo || provider?.draftBucket?.scmRepoLink?.repository);
+
+export let getCustomProviderRemoteProtocolFromUrl = (
+  remoteUrl: string | null | undefined
+): CustomProviderRemoteProtocol => {
+  let normalizedRemoteUrl = remoteUrl?.trim();
+  if (!normalizedRemoteUrl) return 'streamable_http';
+
+  try {
+    let url = new URL(normalizedRemoteUrl);
+    let pathname = url.pathname.toLowerCase();
+    let transport = url.searchParams.get('transport')?.toLowerCase();
+    let protocol = url.searchParams.get('protocol')?.toLowerCase();
+
+    if (
+      pathname === '/sse' ||
+      pathname.endsWith('/sse') ||
+      pathname.includes('/sse/') ||
+      transport === 'sse' ||
+      protocol === 'sse'
+    ) {
+      return 'sse';
+    }
+  } catch {}
+
+  return 'streamable_http';
+};
+
+export let waitForCustomProviderVersionId = async (
+  getVersionId: () => Promise<string | undefined>,
+  opts?: { attempts?: number; delayMs?: number }
+) => {
+  let attempts = opts?.attempts ?? 15;
+  let delayMs = opts?.delayMs ?? 1000;
+
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    let versionId = await getVersionId();
+    if (versionId) return versionId;
+
+    if (attempt < attempts - 1) {
+      await new Promise(resolve => globalThis.setTimeout(resolve, delayMs));
+    }
+  }
+
+  return undefined;
+};

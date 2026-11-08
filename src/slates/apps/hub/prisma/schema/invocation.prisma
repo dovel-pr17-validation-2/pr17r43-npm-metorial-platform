@@ -1,0 +1,52 @@
+model SlateInvocationStorageBucket {
+  oid              Int               @id
+  bucket           String            @unique
+  slateInvocations SlateInvocation[]
+}
+
+model SlateInvocation {
+  oid BigInt @id
+  id  String @unique
+
+  isPending          Boolean
+  hasResponseError   Boolean @default(false)
+  hasInvocationError Boolean @default(false)
+
+  providerInvocationId String
+
+  deploymentOid BigInt
+  deployment    SlateDeployment @relation(fields: [deploymentOid], references: [oid])
+
+  bucketOid Int
+  bucket    SlateInvocationStorageBucket @relation(fields: [bucketOid], references: [oid])
+
+  createdAt DateTime @default(now())
+
+  slateVersionDiscoveries                  SlateVersionDiscovery[]
+  slateInstanceOAuthSetupEvents            SlateInstanceOAuthSetupEvent[]
+  slateAuthConfigEvents                    SlateAuthConfigEvent[]
+  slateSessionToolCalls                    SlateSessionToolCall[]
+  slatePublicToolCalls                     SlatePublicToolCall[]
+  slateInvocationAttachment                SlateInvocationAttachment[]
+  slateErrors                              SlateError[]
+  slateWebhookEventInvocations             SlateWebhookEventInvocation[]
+  triggerPollingRuns                       TriggerPollingRun[]
+  triggerWebhookTargetRegistrationAttempts TriggerWebhookTargetRegistrationAttempt[]
+  triggerEventInvocations                  TriggerEventInvocation[]
+  slateAttachmentUploads                   SlateAttachmentUpload[]
+
+  @@index([deploymentOid, createdAt])
+}
+
+model SlateInvocationAttachment {
+  oid BigInt @id
+  id  String @unique
+
+  invocationOid BigInt
+  invocation    SlateInvocation @relation(fields: [invocationOid], references: [oid], onDelete: Cascade)
+
+  attachmentsOid BigInt
+  attachments    SlateAttachment @relation(fields: [attachmentsOid], references: [oid])
+
+  createdAt DateTime @default(now())
+}

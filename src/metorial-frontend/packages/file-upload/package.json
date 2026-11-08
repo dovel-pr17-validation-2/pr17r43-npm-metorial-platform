@@ -1,0 +1,24 @@
+{
+  "name": "@metorial/file-upload",
+  "version": "1.0.0",
+  "author": "Tobias Herber",
+  "license": "FSL-1.1",
+  "main": "src/index.ts",
+  "scripts": {
+    "test": "vitest run --passWithNoTests",
+    "lint": "prettier src/**/*.{ts,tsx} --check"
+  },
+  "dependencies": {
+    "@metorial/ui": "^1.0.0",
+    "@remixicon/react": "^4.9.0",
+    "react": "19.3.0",
+    "react-dropzone": "^20.1.4",
+    "styled-components": "^6.6.0"
+  },
+  "devDependencies": {
+    "@metorial/tsconfig": "^1.0.0",
+    "@types/react": "^19.3.0",
+    "typescript": "5.9.3",
+    "vitest": "^5.0.4"
+  }
+}

@@ -1,0 +1,50 @@
+enum SystemEventSource {
+  resource
+  callback
+  chat
+  ping
+}
+
+model SystemEvent {
+  oid BigInt @id @default(autoincrement())
+  id  String @unique
+
+  source SystemEventSource
+
+  // source = resource -> "<resource>.<action>"
+  // source = callback -> "callback.<triggerKey>"
+  // source = chat -> "chat.<event>"
+  // source = ping -> "ping"
+  eventType String
+
+  organizationOid BigInt
+  organization    Organization @relation(fields: [organizationOid], references: [oid], onDelete: Cascade)
+
+  instanceOid BigInt?
+  instance    Instance? @relation(fields: [instanceOid], references: [oid], onDelete: SetNull)
+
+  /// [SystemEventPayload]
+  payloadJson       Json?
+  payloadStorageKey String?
+
+  callbackEventId    String? @unique
+  callbackId         String?
+  callbackTriggerKey String?
+
+  chatEventId      String? @unique
+  chatConnectionId String?
+  providerId       String? // Denormalized for event delivery matching
+
+  createdAt DateTime @default(now())
+
+  deliveryIntents EventDeliveryIntent[]
+
+  @@index([organizationOid, createdAt])
+  @@index([instanceOid, createdAt])
+  @@index([createdAt, id])
+  @@index([eventType])
+  @@index([callbackId, callbackTriggerKey])
+  @@index([chatConnectionId, eventType])
+  @@index([providerId, eventType])
+  @@index([payloadStorageKey])
+}

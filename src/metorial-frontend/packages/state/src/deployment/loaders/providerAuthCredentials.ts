@@ -1,0 +1,139 @@
+import {
+  DashboardInstanceProviderDeploymentsAuthCredentialsCreateBody,
+  DashboardInstanceProviderDeploymentsAuthCredentialsListQuery,
+  DashboardInstanceProviderDeploymentsAuthCredentialsUpdateBody
+} from '@metorial/dashboard-sdk';
+import { createLoader } from '@metorial/data-hooks';
+import { usePaginator } from '../../lib/usePaginator';
+import { withAuth } from '../../user';
+
+let providerAuthCredentialsForMethodsLoader = createLoader({
+  name: 'providerAuthCredentialsForMethods',
+  parents: [],
+  fetch: (input: {
+    instanceId: string;
+    queries: (DashboardInstanceProviderDeploymentsAuthCredentialsListQuery & {
+      providerAuthMethodId: string;
+    })[];
+  }) =>
+    withAuth(sdk =>
+      Promise.all(
+        input.queries.map(async query => ({
+          providerAuthMethodId: query.providerAuthMethodId,
+          credentials: await sdk.providerDeployments.authCredentials.list(
+            input.instanceId,
+            query
+          )
+        }))
+      )
+    ),
+  mutators: {}
+});
+
+export let useProviderAuthCredentialsForMethods = (
+  instanceId: string | null | undefined,
+  queries:
+    | (DashboardInstanceProviderDeploymentsAuthCredentialsListQuery & {
+        providerAuthMethodId: string;
+      })[]
+    | null
+) =>
+  providerAuthCredentialsForMethodsLoader.use(
+    instanceId && queries?.length ? { instanceId, queries } : null
+  );
+
+export let providerAuthCredentialsLoader = createLoader({
+  name: 'providerAuthCredentials',
+  parents: [providerAuthCredentialsForMethodsLoader],
+  fetch: ({
+    instanceId,
+    ...query
+  }: { instanceId: string } & DashboardInstanceProviderDeploymentsAuthCredentialsListQuery) =>
+    withAuth(sdk =>
+      sdk.providerDeployments.authCredentials.list(
+        instanceId,
+        query as DashboardInstanceProviderDeploymentsAuthCredentialsListQuery
+      )
+    ),
+  mutators: {}
+});
+
+export let useCreateProviderAuthCredentials =
+  providerAuthCredentialsLoader.createExternalMutator(
+    ({
+      instanceId,
+      ...body
+    }: DashboardInstanceProviderDeploymentsAuthCredentialsCreateBody & {
+      instanceId: string;
+      providerId: string;
+    }) => withAuth(sdk => sdk.providerDeployments.authCredentials.create(instanceId, body)),
+    { disableToast: true }
+  );
+
+export let useDeleteProviderAuthCredentials =
+  providerAuthCredentialsLoader.createExternalMutator(
+    (i: { instanceId: string; providerAuthCredentialsId: string }) =>
+      withAuth(sdk =>
+        sdk.providerDeployments.authCredentials.delete(
+          i.instanceId,
+          i.providerAuthCredentialsId
+        )
+      )
+  );
+
+export let useProviderAuthCredentials = (
+  instanceId: string | null | undefined,
+  query?: DashboardInstanceProviderDeploymentsAuthCredentialsListQuery | null
+) => {
+  let data = usePaginator(
+    pagination =>
+      providerAuthCredentialsLoader.use(
+        instanceId && query ? { ...pagination, ...query, instanceId } : null
+      ),
+    query?.search ?? null
+  );
+
+  return data;
+};
+
+export let providerAuthCredentialLoader = createLoader({
+  name: 'providerAuthCredential',
+  parents: [providerAuthCredentialsLoader, providerAuthCredentialsForMethodsLoader],
+  fetch: (i: { instanceId: string; providerAuthCredentialsId: string }) =>
+    withAuth(sdk =>
+      sdk.providerDeployments.authCredentials.get(i.instanceId, i.providerAuthCredentialsId)
+    ),
+  mutators: {
+    update: (
+      body: DashboardInstanceProviderDeploymentsAuthCredentialsUpdateBody,
+      { input: { instanceId, providerAuthCredentialsId } }
+    ) =>
+      withAuth(
+        async sdk =>
+          await sdk.providerDeployments.authCredentials.update(
+            instanceId,
+            providerAuthCredentialsId,
+            body
+          )
+      ),
+    delete: (_, { input: { instanceId, providerAuthCredentialsId } }) =>
+      withAuth(sdk =>
+        sdk.providerDeployments.authCredentials.delete(instanceId, providerAuthCredentialsId)
+      )
+  }
+});
+
+export let useProviderAuthCredential = (
+  instanceId: string | null | undefined,
+  providerAuthCredentialsId: string | null | undefined
+) => {
+  let data = providerAuthCredentialLoader.use(
+    instanceId && providerAuthCredentialsId ? { instanceId, providerAuthCredentialsId } : null
+  );
+
+  return {
+    ...data,
+    useUpdateMutator: data.useMutator('update'),
+    useDeleteMutator: data.useMutator('delete')
+  };
+};

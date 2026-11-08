@@ -1,0 +1,102 @@
+import { db } from '@metorial/db';
+import { createQueue, QueueRetryError } from '@metorial/queue';
+import { syncConsumerProfileIdentity } from '../lib/syncConsumerProfileIdentity';
+import {
+  archiveDeletedConsumerProfileActorsQueue,
+  syncInstanceConsumerActorsQueue,
+  consumerActorService
+} from '@metorial/module-consumer-entities';
+
+export let syncIdentityConsumerQueue = createQueue<{
+  identityConsumerId: string;
+}>({
+  name: 'cons/ident/sync',
+  workerOpts: { concurrency: 50 }
+});
+
+export let syncIdentityConsumerQueueProcessor = syncIdentityConsumerQueue.process(
+  async data => {
+    let instanceConsumer = await db.instanceConsumer.findUnique({
+      where: {
+        id: data.identityConsumerId
+      }
+    });
+    if (!instanceConsumer) throw new QueueRetryError();
+
+    await syncConsumerProfileIdentity({
+      instanceOid: instanceConsumer.instanceOid,
+      consumerOid: instanceConsumer.consumerOid,
+      name: instanceConsumer.name,
+      email: instanceConsumer.email
+    });
+
+    let profiles = await db.consumerProfile.findMany({
+      where: {
+        instanceOid: instanceConsumer.instanceOid,
+        consumerOid: instanceConsumer.consumerOid,
+        status: 'active'
+      }
+    });
+
+    await reconcileConsumerActorQueue.addMany(
+      profiles.map(p => ({
+        profileId: p.id
+      }))
+    );
+  }
+);
+
+export let reconcileConsumerActorQueue = createQueue<{
+  profileId: string;
+}>({
+  name: 'cons/ident/recon-actor',
+  workerOpts: { concurrency: 50 }
+});
+
+export let reconcileConsumerActorQueueProcessor = reconcileConsumerActorQueue.process(
+  async data => {
+    let profile = await db.consumerProfile.findUnique({
+      where: {
+        id: data.profileId
+      },
+      include: { instance: true }
+    });
+    if (!profile) throw new QueueRetryError();
+    if (profile.status !== 'active' && profile.status !== 'deleted') return;
+
+    let instanceConsumer = await db.instanceConsumer.findUnique({
+      where: {
+        instanceOid_consumerOid: {
+          instanceOid: profile.instanceOid,
+          consumerOid: profile.consumerOid
+        }
+      }
+    });
+    if (!instanceConsumer) throw new QueueRetryError();
+
+    if (profile.status === 'deleted') {
+      await archiveDeletedConsumerProfileActorsQueue.add({ consumerProfileId: profile.id });
+      await syncInstanceConsumerActorsQueue.add({ instanceConsumerId: instanceConsumer.id });
+      return;
+    }
+
+    let renamed = await db.consumerProfile.updateMany({
+      where: { oid: profile.oid, status: 'active' },
+      data: {
+        name: instanceConsumer.name
+      }
+    });
+
+    if (renamed.count == 0) {
+      await archiveDeletedConsumerProfileActorsQueue.add({ consumerProfileId: profile.id });
+      await syncInstanceConsumerActorsQueue.add({ instanceConsumerId: instanceConsumer.id });
+      return;
+    }
+
+    await consumerActorService.reconcileConsumerProfileActors({
+      instance: profile.instance,
+      consumerProfile: profile,
+      name: instanceConsumer.name
+    });
+  }
+);

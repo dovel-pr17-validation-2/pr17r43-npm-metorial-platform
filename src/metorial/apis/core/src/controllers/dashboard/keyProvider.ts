@@ -1,0 +1,388 @@
+import { Paginator } from '@lowerdeck/pagination';
+import { v } from '@lowerdeck/validation';
+import { checkEdition } from '@metorial/editions';
+import { forbiddenError, ServiceError } from '@lowerdeck/error';
+import { accessService } from '@metorial/module-access';
+import { projectService } from '@metorial/module-organization';
+import { flagService, isFlagEnabled } from '@metorial/module-flags';
+import { keyProviderService } from '@metorial/module-secrets';
+import { Controller, Path } from '@metorial/rest';
+import { checkAccess } from '../../middleware/checkAccess';
+import { hasFlags } from '../../middleware/hasFlags';
+import { isDashboardGroup } from '../../middleware/isDashboard';
+import { organizationGroup } from '../../middleware/organizationGroup';
+import {
+  keyProviderErrorPresenter,
+  keyProviderPresenter,
+  keyProviderSetupInfoPresenter,
+  keyProviderValidationPresenter
+} from '@metorial/presenters';
+
+let keyProviderFlags = hasFlags(
+  checkEdition('cloud') ? ['paid-key-providers', 'advanced-security-management-enabled'] : []
+);
+
+let tenantKeyProviderTypes = v.enumOf(['aws_kms', 'gcp_kms', 'azure_key_vault']);
+
+let keyProviderTypeFlags = {
+  gcp_kms: 'key-providers-gcp-kms-enabled',
+  azure_key_vault: 'key-providers-azure-key-vault-enabled'
+} as const;
+
+let assertKeyProviderTypeEnabled = async (
+  ctx: any,
+  type: 'aws_kms' | 'gcp_kms' | 'azure_key_vault' | undefined
+) => {
+  if (!type || type === 'aws_kms') return;
+
+  let flags = await flagService.getFlags({ organization: ctx.organization });
+  if (!isFlagEnabled(flags[keyProviderTypeFlags[type]])) {
+    throw new ServiceError(
+      forbiddenError({ message: 'This key provider type is not enabled for your organization' })
+    );
+  }
+};
+
+let resolveProject = async (ctx: any) => {
+  let project = await projectService.getProjectById({
+    organization: ctx.organization,
+    projectId: ctx.params.projectId,
+    member: ctx.member,
+    actor: ctx.actor
+  });
+
+  return { project };
+};
+
+export let dashboardKeyProviderController = Controller.create(
+  {
+    name: 'Key providers',
+    description: 'Manage project encryption key providers and diagnostics'
+  },
+  {
+    list: organizationGroup
+      .use(isDashboardGroup())
+      .use(keyProviderFlags)
+      .get(
+        Path(
+          '/dashboard/organizations/:organizationId/projects/:projectId/key-providers',
+          'dashboard.projects.keyProviders.list'
+        ),
+        {
+          name: 'List key providers',
+          description: 'Returns a paginated list of key providers for a project'
+        }
+      )
+      .use(checkAccess({ possibleScopes: ['organization.project:read'] }))
+      .query('default', Paginator.validate(v.object({})))
+      .outputList(keyProviderPresenter)
+      .do(async ctx => {
+        let { project } = await resolveProject(ctx);
+
+        await accessService.checkTargetAccess({
+          authInfo: ctx.auth,
+          organization: ctx.organization,
+          member: ctx.member,
+          project,
+          possibleScopes: ['organization.project:read']
+        });
+
+        let paginator = await keyProviderService.listKeyProviders({
+          organization: ctx.organization,
+          project
+        });
+        let list = await paginator.run(ctx.query);
+
+        return Paginator.present(list, keyProvider =>
+          keyProviderPresenter.present({ keyProvider })
+        );
+      }),
+
+    createManaged: organizationGroup
+      .use(isDashboardGroup())
+      .use(keyProviderFlags)
+      .post(
+        Path(
+          '/dashboard/organizations/:organizationId/projects/:projectId/key-providers',
+          'dashboard.projects.keyProviders.createManaged'
+        ),
+        {
+          name: 'Create managed key provider',
+          description: 'Creates a Metorial-managed key provider for a project'
+        }
+      )
+      .use(checkAccess({ possibleScopes: ['organization.project:manage'] }))
+      .body(
+        'default',
+        v.object({
+          name: v.string()
+        })
+      )
+      .output(keyProviderPresenter)
+      .do(async ctx => {
+        let { project } = await resolveProject(ctx);
+
+        await accessService.checkTargetAccess({
+          authInfo: ctx.auth,
+          organization: ctx.organization,
+          member: ctx.member,
+          project,
+          possibleScopes: ['organization.project:manage']
+        });
+
+        let keyProvider = await keyProviderService.createManagedKeyProvider({
+          organization: ctx.organization,
+          project,
+          name: ctx.body.name,
+          performedBy: ctx.actor,
+          context: ctx.context
+        });
+
+        return keyProviderPresenter.present({ keyProvider });
+      }),
+
+    import: organizationGroup
+      .use(isDashboardGroup())
+      .use(keyProviderFlags)
+      .post(
+        Path(
+          '/dashboard/organizations/:organizationId/projects/:projectId/key-providers/import',
+          'dashboard.projects.keyProviders.import'
+        ),
+        {
+          name: 'Import key provider',
+          description: 'Imports a customer-managed key provider for a project'
+        }
+      )
+      .use(checkAccess({ possibleScopes: ['organization.project:manage'] }))
+      .body(
+        'default',
+        v.object({
+          type: v.optional(tenantKeyProviderTypes),
+          key_input: v.record(v.any())
+        })
+      )
+      .output(keyProviderPresenter)
+      .do(async ctx => {
+        let { project } = await resolveProject(ctx);
+
+        await accessService.checkTargetAccess({
+          authInfo: ctx.auth,
+          organization: ctx.organization,
+          member: ctx.member,
+          project,
+          possibleScopes: ['organization.project:manage']
+        });
+
+        await assertKeyProviderTypeEnabled(ctx, ctx.body.type);
+
+        let keyProvider = await keyProviderService.importKeyProvider({
+          organization: ctx.organization,
+          project,
+          type: ctx.body.type,
+          keyInput: ctx.body.key_input,
+          performedBy: ctx.actor,
+          context: ctx.context
+        });
+
+        return keyProviderPresenter.present({ keyProvider });
+      }),
+
+    get: organizationGroup
+      .use(isDashboardGroup())
+      .use(keyProviderFlags)
+      .get(
+        Path(
+          '/dashboard/organizations/:organizationId/projects/:projectId/key-providers/:keyProviderId',
+          'dashboard.projects.keyProviders.get'
+        ),
+        {
+          name: 'Get key provider',
+          description: 'Retrieves a key provider for a project'
+        }
+      )
+      .use(checkAccess({ possibleScopes: ['organization.project:read'] }))
+      .output(keyProviderPresenter)
+      .do(async ctx => {
+        let { project } = await resolveProject(ctx);
+
+        await accessService.checkTargetAccess({
+          authInfo: ctx.auth,
+          organization: ctx.organization,
+          member: ctx.member,
+          project,
+          possibleScopes: ['organization.project:read']
+        });
+
+        let keyProvider = await keyProviderService.getKeyProvider({
+          organization: ctx.organization,
+          project,
+          keyProviderId: ctx.params.keyProviderId
+        });
+
+        return keyProviderPresenter.present({ keyProvider });
+      }),
+
+    getSetupInfo: organizationGroup
+      .use(isDashboardGroup())
+      .use(keyProviderFlags)
+      .get(
+        Path(
+          '/dashboard/organizations/:organizationId/projects/:projectId/key-providers/:keyProviderId/setup-info',
+          'dashboard.projects.keyProviders.getSetupInfo'
+        ),
+        {
+          name: 'Get key provider setup info',
+          description: 'Returns setup instructions for importing a key provider'
+        }
+      )
+      .use(checkAccess({ possibleScopes: ['organization.project:read'] }))
+      .query(
+        'default',
+        v.object({
+          type: v.optional(tenantKeyProviderTypes),
+          region: v.optional(v.string()),
+          key_id: v.optional(v.string())
+        })
+      )
+      .output(keyProviderSetupInfoPresenter)
+      .do(async ctx => {
+        let { project } = await resolveProject(ctx);
+
+        await accessService.checkTargetAccess({
+          authInfo: ctx.auth,
+          organization: ctx.organization,
+          member: ctx.member,
+          project,
+          possibleScopes: ['organization.project:read']
+        });
+
+        await assertKeyProviderTypeEnabled(ctx, ctx.query.type);
+
+        let setupInfo = await keyProviderService.getSetupInfo({
+          organization: ctx.organization,
+          project,
+          input: {
+            type: ctx.query.type,
+            region: ctx.query.region,
+            keyId: ctx.query.key_id
+          }
+        });
+
+        return keyProviderSetupInfoPresenter.present({ setupInfo });
+      }),
+
+    validate: organizationGroup
+      .use(isDashboardGroup())
+      .use(keyProviderFlags)
+      .post(
+        Path(
+          '/dashboard/organizations/:organizationId/projects/:projectId/key-providers/:keyProviderId/validate',
+          'dashboard.projects.keyProviders.validate'
+        ),
+        {
+          name: 'Validate key provider',
+          description: 'Validates that a key provider is reachable and configured correctly'
+        }
+      )
+      .use(checkAccess({ possibleScopes: ['organization.project:manage'] }))
+      .output(keyProviderValidationPresenter)
+      .do(async ctx => {
+        let { project } = await resolveProject(ctx);
+
+        await accessService.checkTargetAccess({
+          authInfo: ctx.auth,
+          organization: ctx.organization,
+          member: ctx.member,
+          project,
+          possibleScopes: ['organization.project:manage']
+        });
+
+        let validation = await keyProviderService.validateKeyProvider({
+          organization: ctx.organization,
+          project,
+          keyProviderId: ctx.params.keyProviderId,
+          performedBy: ctx.actor,
+          context: ctx.context
+        });
+
+        return keyProviderValidationPresenter.present({ validation });
+      }),
+
+    setDefault: organizationGroup
+      .use(isDashboardGroup())
+      .use(keyProviderFlags)
+      .post(
+        Path(
+          '/dashboard/organizations/:organizationId/projects/:projectId/key-providers/:keyProviderId/set-default',
+          'dashboard.projects.keyProviders.setDefault'
+        ),
+        {
+          name: 'Set default key provider',
+          description: 'Sets the default key provider for a project'
+        }
+      )
+      .use(checkAccess({ possibleScopes: ['organization.project:manage'] }))
+      .output(keyProviderPresenter)
+      .do(async ctx => {
+        let { project } = await resolveProject(ctx);
+
+        await accessService.checkTargetAccess({
+          authInfo: ctx.auth,
+          organization: ctx.organization,
+          member: ctx.member,
+          project,
+          possibleScopes: ['organization.project:manage']
+        });
+
+        let keyProvider = await keyProviderService.setDefaultKeyProvider({
+          organization: ctx.organization,
+          project,
+          keyProviderId: ctx.params.keyProviderId,
+          performedBy: ctx.actor,
+          context: ctx.context
+        });
+
+        return keyProviderPresenter.present({ keyProvider });
+      }),
+
+    listErrors: organizationGroup
+      .use(isDashboardGroup())
+      .use(keyProviderFlags)
+      .get(
+        Path(
+          '/dashboard/organizations/:organizationId/projects/:projectId/key-providers/:keyProviderId/errors',
+          'dashboard.projects.keyProviders.errors.list'
+        ),
+        {
+          name: 'List key provider errors',
+          description: 'Returns aggregated key provider errors for diagnostics'
+        }
+      )
+      .use(checkAccess({ possibleScopes: ['organization.project:read'] }))
+      .query('default', Paginator.validate(v.object({})))
+      .outputList(keyProviderErrorPresenter)
+      .do(async ctx => {
+        let { project } = await resolveProject(ctx);
+
+        await accessService.checkTargetAccess({
+          authInfo: ctx.auth,
+          organization: ctx.organization,
+          member: ctx.member,
+          project,
+          possibleScopes: ['organization.project:read']
+        });
+
+        let paginator = await keyProviderService.listKeyProviderErrors({
+          organization: ctx.organization,
+          project,
+          keyProviderId: ctx.params.keyProviderId
+        });
+        let list = await paginator.run(ctx.query);
+
+        return Paginator.present(list, keyProviderError =>
+          keyProviderErrorPresenter.present({ keyProviderError })
+        );
+      })
+  }
+);

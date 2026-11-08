@@ -1,0 +1,260 @@
+import * as RadixPopover from '@radix-ui/react-popover';
+import React, { useEffect, useState } from 'react';
+import { keyframes, styled } from 'styled-components';
+import {
+  preventPopoverDismissForNestedOverlay,
+  useDialogContext,
+  useZindex
+} from '../dialog/state';
+import { theme } from '../theme';
+import { OverlayOpenProvider, useSuppressTooltipWhileOpen } from '../tooltip/state';
+
+let fadeInTop = keyframes`
+  from {
+    opacity: 0;
+    transform: translateY(-10px) scale(0.99);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+`;
+
+let fadeOutTop = keyframes`
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(0.99);
+  }
+
+  to {
+    opacity: 0;
+    transform: translateY(-10px) scale(1);
+  }
+`;
+
+let fadeInBottom = keyframes`
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.99);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+`;
+
+let fadeOutBottom = keyframes`
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(0.99);
+  }
+
+  to {
+    opacity: 0;
+    transform: translateY(10px) scale(1);
+  }
+`;
+
+let fadeInLeft = keyframes`
+  from {
+    opacity: 0;
+    transform: translateX(-10px) scale(0.99);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+`;
+
+let fadeOutLeft = keyframes`
+  from {
+    opacity: 1;
+    transform: translateX(0) scale(0.99);
+  }
+
+  to {
+    opacity: 0;
+    transform: translateX(-10px) scale(1);
+  }
+`;
+
+let fadeInRight = keyframes`
+  from {
+    opacity: 0;
+    transform: translateX(10px) scale(0.99);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+`;
+
+let fadeOutRight = keyframes`
+  from {
+    opacity: 1;
+    transform: translateX(0) scale(0.99);
+  }
+
+  to {
+    opacity: 0;
+    transform: translateX(10px) scale(1);
+  }
+`;
+
+let Wrapper = styled(RadixPopover.Content)`
+  display: flex;
+  gap: 10;
+  align-items: center;
+  cursor: pointer;
+  background: rgba(245, 245, 245, 0.7);
+  backdrop-filter: blur(10px);
+  border-radius: 10px;
+  min-width: 200px;
+  will-change: transform, opacity;
+  outline: none;
+  border: solid 1px ${theme.colors.gray400};
+  box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+
+  &[data-state='open'][data-side='top'] {
+    animation: ${fadeInBottom} 0.2s ease forwards;
+  }
+
+  &[data-state='closed'][data-side='top'] {
+    animation: ${fadeOutBottom} 0.2s ease forwards;
+  }
+
+  &[data-state='open'][data-side='bottom'] {
+    animation: ${fadeInTop} 0.2s ease forwards;
+  }
+
+  &[data-state='closed'][data-side='bottom'] {
+    animation: ${fadeOutTop} 0.2s ease forwards;
+  }
+
+  &[data-state='open'][data-side='left'] {
+    animation: ${fadeInLeft} 0.2s ease forwards;
+  }
+
+  &[data-state='closed'][data-side='left'] {
+    animation: ${fadeOutLeft} 0.2s ease forwards;
+  }
+
+  &[data-state='open'][data-side='right'] {
+    animation: ${fadeInRight} 0.2s ease forwards;
+  }
+
+  &[data-state='closed'][data-side='right'] {
+    animation: ${fadeOutRight} 0.2s ease forwards;
+  }
+`;
+
+let ContentWrapper = styled('div')`
+  padding: 15px;
+`;
+
+let Arrow = styled(RadixPopover.Arrow)`
+  fill: ${theme.colors.background};
+`;
+
+export type PopoverProps = {
+  trigger: React.ReactNode;
+  children: React.ReactNode;
+  arrow?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  onOpenAutoFocus?: React.ComponentProps<typeof RadixPopover.Content>['onOpenAutoFocus'];
+  open?: boolean;
+
+  side?: React.ComponentProps<typeof RadixPopover.Content>['side'];
+  align?: React.ComponentProps<typeof RadixPopover.Content>['align'];
+  sideOffset?: number;
+  alignOffset?: number;
+
+  // The the operationKey changes, the popover will close
+  operationKey?: string;
+} & Omit<React.ComponentPropsWithoutRef<'button'>, 'children' | 'content'>;
+
+let Root = React.forwardRef<HTMLButtonElement, PopoverProps>(
+  (
+    {
+      trigger,
+      children,
+      arrow,
+      operationKey,
+      onOpenChange,
+      onOpenAutoFocus,
+      side,
+      align,
+      sideOffset,
+      alignOffset,
+      open: openProp,
+      ...triggerProps
+    },
+    ref
+  ) => {
+    let [open, setOpen] = useState(false);
+    let dialog = useDialogContext();
+
+    useEffect(() => {
+      setOpen(false);
+    }, [operationKey]);
+
+    useEffect(() => {
+      if (onOpenChange) onOpenChange(open);
+    }, [open]);
+
+    useEffect(() => {
+      if (typeof openProp === 'boolean') setOpen(openProp);
+    }, [openProp]);
+
+    useSuppressTooltipWhileOpen(open);
+
+    let zIndex = useZindex(open);
+
+    return (
+      <RadixPopover.Root open={open} onOpenChange={setOpen}>
+        <OverlayOpenProvider value={open}>
+          <RadixPopover.Trigger {...triggerProps} asChild ref={ref}>
+            {trigger}
+          </RadixPopover.Trigger>
+        </OverlayOpenProvider>
+
+        <RadixPopover.Portal container={dialog?.contentRef?.current}>
+          <Wrapper
+            style={{ zIndex }}
+            side={side}
+            align={align}
+            sideOffset={sideOffset}
+            alignOffset={alignOffset}
+            onOpenAutoFocus={onOpenAutoFocus}
+            onPointerDownOutside={preventPopoverDismissForNestedOverlay}
+            onInteractOutside={preventPopoverDismissForNestedOverlay}
+            onFocusOutside={preventPopoverDismissForNestedOverlay}
+          >
+            {children}
+
+            {arrow && <Arrow />}
+          </Wrapper>
+        </RadixPopover.Portal>
+      </RadixPopover.Root>
+    );
+  }
+);
+
+let Content = ({
+  children,
+  style
+}: {
+  children: React.ReactNode;
+  style?: React.CSSProperties;
+}) => {
+  return <ContentWrapper style={style}>{children}</ContentWrapper>;
+};
+
+export let Popover = Object.assign(Root, {
+  Content,
+  Root
+});

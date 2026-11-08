@@ -1,0 +1,78 @@
+enum UserStatus {
+  active
+  deleted
+}
+
+enum UserType {
+  user
+  system
+}
+
+model User {
+  oid BigInt @id @default(autoincrement())
+  id  String @unique
+
+  status UserStatus
+  type   UserType
+
+  email     String  @unique
+  name      String
+  firstName String?
+  lastName  String?
+  timezone  String?
+
+  /// [EntityImage]
+  image Json
+
+  passwordHash String?
+
+  internalTenantIdentifier String?
+  cargoTenantId            String?
+  cargoEnvironmentId       String?
+  synthesisTenantId        String?
+  synthesisEnvironmentId   String?
+
+  resourceTenantOid BigInt?         @unique
+  resourceTenant    ResourceTenant? @relation(fields: [resourceTenantOid], references: [oid], onDelete: SetNull)
+
+  resourceGroupOid BigInt?        @unique
+  resourceGroup    ResourceGroup? @relation(fields: [resourceGroupOid], references: [oid], onDelete: SetNull)
+
+  globalProfileOid BigInt?
+  globalProfile    GlobalProfile? @relation(fields: [globalProfileOid], references: [oid], onDelete: Cascade)
+
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @default(now()) @updatedAt
+
+  sessions                               UserSession[]
+  members                                OrganizationMember[]
+  access                                 MachineAccess[]
+  files                                  File[]
+  profile                                Profile?
+  fileUploads                            FileUpload[]
+  oauthAuthorizations                    OAuthAuthorization[]
+  cliDevices                             CliDevice[]
+  oauthAuthorizationFlows                OAuthAuthorizationFlow[]
+  apiKeyCreatedEmailSends                ApiKeyCreatedEmailSend[]
+  apiKeyExpiredEmailSends                ApiKeyExpiredEmailSend[]
+  workspaceProfiles                      WorkspaceProfile[]
+  organizationNotificationSettings       OrganizationNotificationSetting[]
+  organizationNotificationDigestSettings OrganizationNotificationDigestSetting[]
+  organizationConfigs                    OrganizationConfig[]
+  organizationLayouts                    OrganizationLayout[]
+  consumers                              Consumer[]
+}
+
+model UserSession {
+  oid BigInt @id @default(autoincrement())
+  id  String @unique
+
+  clientSecret String @unique
+
+  userOid BigInt
+  user    User   @relation(fields: [userOid], references: [oid])
+
+  expiresAt DateTime?
+  createdAt DateTime  @default(now())
+}

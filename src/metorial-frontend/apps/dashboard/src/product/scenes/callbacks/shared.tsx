@@ -1,0 +1,200 @@
+import { Badge, Callout, Text, theme } from '@metorial/ui';
+import { Link } from 'react-router-dom';
+import styled from 'styled-components';
+
+export type CallbackSync = {
+  status: 'pending' | 'synced' | 'failed';
+  error: { code: string; message: string | null } | null;
+  syncedAt: Date | null;
+};
+
+export let DashedLink = styled(Link)`
+  color: ${theme.colors.gray900};
+  text-decoration: underline dashed;
+  text-decoration-color: ${theme.colors.gray500};
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+  font-weight: 500;
+  word-break: break-all;
+  transition:
+    color 120ms ease,
+    text-decoration-color 120ms ease;
+
+  &:hover {
+    color: ${theme.colors.gray700};
+    text-decoration-color: ${theme.colors.gray700};
+  }
+`;
+
+export let Muted = ({ children }: { children?: React.ReactNode }) => (
+  <Text size="2" color="gray600">
+    {children ?? '-'}
+  </Text>
+);
+
+let SYNC_LABELS: Record<CallbackSync['status'], string> = {
+  pending: 'Registering',
+  synced: 'Live',
+  failed: 'Registration Failed'
+};
+
+export let getSyncColor = (status: CallbackSync['status']) => {
+  if (status === 'synced') return 'blue';
+  if (status === 'failed') return 'red';
+  return 'orange';
+};
+
+export let CallbackSyncBadge = ({
+  sync,
+  size
+}: {
+  sync: CallbackSync;
+  size?: '1' | '2' | '3';
+}) => (
+  <Badge size={size} color={getSyncColor(sync.status)}>
+    {SYNC_LABELS[sync.status]}
+  </Badge>
+);
+
+export let CallbackSyncErrorCallout = ({
+  sync,
+  providerName
+}: {
+  sync: CallbackSync;
+  providerName?: string;
+}) => {
+  if (sync.status !== 'failed') return null;
+
+  let subject = providerName ? `the ${providerName} callback` : 'this callback';
+  let errorDetail = sync.error?.message ?? sync.error?.code;
+
+  return (
+    <Callout color="red">
+      <span>
+        <strong>Metorial could not register {subject} with the provider.</strong>{' '}
+        {errorDetail
+          ? `${errorDetail} — no events will be delivered until this is resolved.`
+          : 'No events will be delivered until this is resolved.'}
+      </span>
+    </Callout>
+  );
+};
+
+export let CallbackPendingCallout = ({ sync }: { sync: CallbackSync }) => {
+  if (sync.status !== 'pending') return null;
+
+  return (
+    <Callout color="orange">
+      <span>
+        <strong>Registration in progress.</strong> Metorial is registering this callback with
+        the provider. Events start arriving once registration completes.
+      </span>
+    </Callout>
+  );
+};
+
+export let getIncomingWebhookStatusColor = (status: string) => {
+  if (status === 'succeeded') return 'blue';
+  if (status === 'failed_final') return 'red';
+  if (status === 'failed_retrying') return 'orange';
+  return 'gray';
+};
+
+export let INCOMING_WEBHOOK_STATUS_LABELS: Record<string, string> = {
+  pending: 'Pending',
+  failed_retrying: 'Retrying',
+  failed_final: 'Failed',
+  succeeded: 'Succeeded'
+};
+
+export let getIncomingWebhookStatusLabel = (status: string) =>
+  INCOMING_WEBHOOK_STATUS_LABELS[status] ?? status;
+
+export let getWebhookRegistrationStatusColor = (
+  status: 'awaiting_setup' | 'active' | 'archived' | 'deleted'
+) => {
+  if (status === 'active') return 'blue';
+  if (status === 'awaiting_setup') return 'orange';
+  if (status === 'archived') return 'gray';
+  return 'gray';
+};
+
+export let WEBHOOK_REGISTRATION_STATUS_LABELS: Record<string, string> = {
+  awaiting_setup: 'Awaiting Setup',
+  active: 'Active',
+  archived: 'Archived',
+  deleted: 'Deleted'
+};
+
+export let getStatusColor = (status: 'active' | 'archived' | 'deleted') => {
+  if (status === 'active') return 'blue';
+  if (status === 'archived') return 'orange';
+  return 'gray';
+};
+
+export type EventDeliveryStatus =
+  | 'pending'
+  | 'retrying'
+  | 'delivered'
+  | 'failed'
+  | 'cancelled';
+
+export let EVENT_DELIVERY_STATUS_LABELS: Record<EventDeliveryStatus, string> = {
+  pending: 'Pending',
+  retrying: 'Retrying',
+  delivered: 'Delivered',
+  failed: 'Failed',
+  cancelled: 'Cancelled'
+};
+
+export let getEventDeliveryStatusColor = (status: EventDeliveryStatus) => {
+  if (status === 'delivered') return 'blue';
+  if (status === 'failed') return 'red';
+  if (status === 'pending' || status === 'retrying') return 'orange';
+  return 'gray';
+};
+
+export let getEventDeliveryStatusLabel = (status: EventDeliveryStatus) =>
+  EVENT_DELIVERY_STATUS_LABELS[status];
+
+export let canRetryEventDelivery = (status: EventDeliveryStatus) =>
+  status === 'delivered' || status === 'failed' || status === 'cancelled';
+
+export let getEventDeliveryActionLabel = (status: EventDeliveryStatus) =>
+  status === 'delivered' ? 'Resend Webhook' : 'Retry Delivery';
+
+export let decodeDeliveryBody = (body: string | null | undefined) => {
+  if (!body) return null;
+
+  try {
+    return { json: JSON.stringify(JSON.parse(body), null, 2), text: body };
+  } catch {
+    return { json: null, text: body };
+  }
+};
+
+export let decodeWebhookBody = (
+  body: { encoding: 'base64'; content: string } | null | undefined
+) => {
+  if (!body) return null;
+
+  try {
+    let decoded = atob(body.content);
+    try {
+      return { json: JSON.stringify(JSON.parse(decoded), null, 2) as unknown, text: decoded };
+    } catch {
+      return { json: null, text: decoded };
+    }
+  } catch {
+    return { json: null, text: body.content };
+  }
+};
+
+export let truncateReceiverUrl = (url: string) => {
+  let urlObj = new URL(url);
+  let path = urlObj.pathname;
+  if (path.length > 20) {
+    path = path.slice(0, 17) + '...' + path.slice(-8);
+  }
+  return `${urlObj.origin}${path}`;
+};

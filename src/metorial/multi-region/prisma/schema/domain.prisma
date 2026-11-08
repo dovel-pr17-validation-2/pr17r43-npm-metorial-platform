@@ -1,0 +1,28 @@
+enum AccountDomainStatus {
+  active
+  inactive
+}
+
+enum AccountDomainVerificationStatus {
+  unverified
+  verified_basic
+  verified_full
+}
+
+model AccountDomain {
+  oid BigInt @id @default(autoincrement())
+  id  String @unique
+
+  domain String @unique
+
+  status             AccountDomainStatus
+  verificationStatus AccountDomainVerificationStatus
+
+  accountId String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([accountId, status, id])
+  @@index([status, domain])
+}

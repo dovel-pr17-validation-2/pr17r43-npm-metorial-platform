@@ -1,0 +1,43 @@
+import { checkEdition } from '@metorial/editions';
+import { setSentry, shouldIgnoreSentryHttpError } from '@lowerdeck/sentry';
+import { initTelemetry } from '@lowerdeck/telemetry';
+import * as Sentry from '@sentry/bun';
+
+declare global {
+  // eslint-disable-next-line no-var
+  var sentryInitialized: boolean | undefined;
+}
+
+initTelemetry({
+  serviceName: 'mte-shuttle',
+  allowRootSpans: false
+});
+
+if (
+  checkEdition('cloud') &&
+  process.env.METORIAL_ENV !== 'development' &&
+  !global.sentryInitialized &&
+  process.env.SENTRY_DSN
+) {
+  global.sentryInitialized = true;
+
+  Sentry.init({
+    dsn: process.env.SENTRY_DSN,
+
+    environment: process.env.METORIAL_ENV,
+
+    beforeSend(event, hint) {
+      if (shouldIgnoreSentryHttpError(hint)) return null;
+
+      if (!event.tags) event.tags = {};
+      event.tags.allocationId = process.env.NOMAD_ALLOC_ID || 'unknown';
+      return event;
+    },
+
+    ignoreErrors: ['The client is closed']
+  });
+
+  setSentry(Sentry as any);
+
+  console.log('Sentry initialized for Bun');
+}

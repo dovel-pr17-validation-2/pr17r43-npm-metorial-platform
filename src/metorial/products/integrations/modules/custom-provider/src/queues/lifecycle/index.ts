@@ -1,0 +1,67 @@
+import { combineQueueProcessors } from '@lowerdeck/queue';
+import {
+  customProviderArchivedQueueProcessor,
+  customProviderArchiveAuthConfigsManyQueueProcessor,
+  customProviderArchiveAuthCredentialsManyQueueProcessor,
+  customProviderArchiveConfigsManyQueueProcessor,
+  customProviderArchiveConfigVaultsManyQueueProcessor,
+  customProviderArchiveDeploymentsManyQueueProcessor,
+  customProviderArchiveIdentityCredentialsManyQueueProcessor,
+  customProviderArchiveIntegrationProvidersManyQueueProcessor,
+  customProviderArchiveMagicMcpServerProvidersManyQueueProcessor,
+  customProviderArchiveMonitorsManyQueueProcessor,
+  customProviderArchiveProviderSetupSessionsManyQueueProcessor,
+  customProviderArchiveSessionProvidersManyQueueProcessor,
+  customProviderArchiveSessionTemplateProvidersManyQueueProcessor,
+  customProviderArchiveSkillResourcesManyQueueProcessor,
+  customProviderCreatedQueueProcessor,
+  customProviderDeleteFirewallAssignmentsManyQueueProcessor,
+  customProviderUpdatedQueueProcessor
+} from './customProvider';
+import { customProviderDeploymentCreatedQueueProcessor } from './customProviderDeployment';
+
+export let lifecycleQueues = combineQueueProcessors([
+  customProviderCreatedQueueProcessor,
+  customProviderUpdatedQueueProcessor,
+  customProviderArchivedQueueProcessor,
+  customProviderArchiveIntegrationProvidersManyQueueProcessor,
+  customProviderArchiveMagicMcpServerProvidersManyQueueProcessor,
+  customProviderArchiveDeploymentsManyQueueProcessor,
+  customProviderArchiveConfigsManyQueueProcessor,
+  customProviderArchiveAuthConfigsManyQueueProcessor,
+  customProviderArchiveAuthCredentialsManyQueueProcessor,
+  customProviderArchiveConfigVaultsManyQueueProcessor,
+  customProviderArchiveProviderSetupSessionsManyQueueProcessor,
+  customProviderArchiveIdentityCredentialsManyQueueProcessor,
+  customProviderArchiveSessionProvidersManyQueueProcessor,
+  customProviderArchiveSessionTemplateProvidersManyQueueProcessor,
+  customProviderDeleteFirewallAssignmentsManyQueueProcessor,
+  customProviderArchiveSkillResourcesManyQueueProcessor,
+  customProviderArchiveMonitorsManyQueueProcessor,
+
+  customProviderDeploymentCreatedQueueProcessor
+]);
+
+export let lifecycleSubspaceQueues = combineQueueProcessors([
+  customProviderCreatedQueueProcessor,
+  customProviderUpdatedQueueProcessor,
+  customProviderDeploymentCreatedQueueProcessor
+]);
+
+export let lifecycleFederationQueues = combineQueueProcessors([
+  customProviderArchivedQueueProcessor,
+  customProviderArchiveIntegrationProvidersManyQueueProcessor,
+  customProviderArchiveMagicMcpServerProvidersManyQueueProcessor,
+  customProviderArchiveDeploymentsManyQueueProcessor,
+  customProviderArchiveConfigsManyQueueProcessor,
+  customProviderArchiveAuthConfigsManyQueueProcessor,
+  customProviderArchiveAuthCredentialsManyQueueProcessor,
+  customProviderArchiveConfigVaultsManyQueueProcessor,
+  customProviderArchiveProviderSetupSessionsManyQueueProcessor,
+  customProviderArchiveIdentityCredentialsManyQueueProcessor,
+  customProviderArchiveSessionProvidersManyQueueProcessor,
+  customProviderArchiveSessionTemplateProvidersManyQueueProcessor,
+  customProviderDeleteFirewallAssignmentsManyQueueProcessor,
+  customProviderArchiveSkillResourcesManyQueueProcessor,
+  customProviderArchiveMonitorsManyQueueProcessor
+]);

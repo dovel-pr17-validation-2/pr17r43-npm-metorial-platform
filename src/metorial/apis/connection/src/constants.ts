@@ -1,0 +1,34 @@
+export let CONNECTION_TYPES = ['sse', 'websocket', 'streamable_http', 'sessionless'] as const;
+export type ConnectionType = (typeof CONNECTION_TYPES)[number];
+
+export let CONNECTION_TYPE_ALIASES: {
+  [K in ConnectionType]: [K, ...string[]];
+} = {
+  sse: ['sse', 'server-sent-events', 'server_sent_events', '2024-11-05', '2024_11_05'],
+  streamable_http: [
+    'streamable_http',
+    'streamable-http',
+    'http',
+    '2025-03-26',
+    '2025_03_26',
+    '2025-06-18',
+    '2025_06_18',
+    '2025-11-25',
+    '2025_11_25',
+    'mcp'
+  ],
+  sessionless: ['sessionless', '2026-07-28', '2026_07_28'],
+  websocket: ['websocket', 'ws']
+};
+
+export let ALIAS_TO_CONNECTION_TYPE = new Map(
+  Object.entries(CONNECTION_TYPE_ALIASES).flatMap(([key, value]) =>
+    value.map(v => [v, key] as [string, ConnectionType])
+  )
+);
+
+export let toConnectionType = (input: string): ConnectionType | null => {
+  let type = ALIAS_TO_CONNECTION_TYPE.get(input.toLowerCase());
+  if (!type) return null;
+  return type;
+};

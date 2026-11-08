@@ -1,0 +1,212 @@
+import { createMapper } from '@metorial/util-resource-mapper/compact';
+
+export type ProviderDeploymentsConfigsListOutput = {
+  items: ({
+    object: 'provider.config';
+    id: string;
+    status: 'active' | 'archived' | 'deleted';
+    isDefault: boolean;
+    name: string | null;
+    description: string | null;
+    metadata: Record<string, any> | null;
+    toolFilter:
+      | { type: 'allow_all'; ignoreParentFilters: boolean }
+      | {
+          type: 'filter';
+          filters: (
+            | { type: 'tool_keys'; keys: string[] }
+            | { type: 'tool_categories'; keys: string[] }
+            | { type: 'tool_regex'; pattern: string }
+            | { type: 'resource_regex'; pattern: string }
+            | { type: 'resource_uris'; uris: string[] }
+            | { type: 'prompt_keys'; keys: string[] }
+            | { type: 'prompt_regex'; pattern: string }
+          )[];
+          ignoreParentFilters: boolean;
+        };
+    providerId: string;
+    specificationId: string;
+    deployment: {
+      object: 'provider.deployment#preview';
+      id: string;
+      isDefault: boolean;
+      name: string | null;
+      description: string | null;
+      metadata: Record<string, any> | null;
+      providerId: string;
+      createdAt: Date;
+      updatedAt: Date;
+    } | null;
+    fromVault: {
+      object: 'provider.config_vault';
+      id: string;
+      status: 'active' | 'archived' | 'deleted';
+      name: string;
+      description: string | null;
+      metadata: Record<string, any> | null;
+      providerId: string;
+      deployment: {
+        object: 'provider.deployment#preview';
+        id: string;
+        isDefault: boolean;
+        name: string | null;
+        description: string | null;
+        metadata: Record<string, any> | null;
+        providerId: string;
+        createdAt: Date;
+        updatedAt: Date;
+      } | null;
+      createdAt: Date;
+      updatedAt: Date;
+    } | null;
+    access: {
+      source: 'explorer' | null;
+      type: 'public' | 'owner_locked';
+      visibility: 'anyone' | 'owner';
+      owner: {
+        type: 'person' | 'agent' | 'consumer' | 'organization_member';
+        name: string | null;
+        imageUrl: string | null;
+        email: string | null;
+        organizationMember?: { id: string } | undefined;
+        consumer?:
+          | { id: string; profileId: string; portalId: string | null }
+          | undefined;
+      } | null;
+    };
+    createdAt: Date;
+    updatedAt: Date;
+  } & { publicMcpServerId: string | null })[];
+  pagination: { hasMoreBefore: boolean; hasMoreAfter: boolean };
+};
+
+export let mapProviderDeploymentsConfigsListOutput =
+  /* @__PURE__ */ createMapper<ProviderDeploymentsConfigsListOutput>(
+    [
+      7,
+      [
+        3,
+        [
+          [
+            0,
+            [
+              1,
+              [
+                'is_default',
+                ['tool_filter', 1, [3, [[0, [1, ['ignore_parent_filters']]]]]],
+                'provider_id',
+                'specification_id',
+                [
+                  'deployment',
+                  0,
+                  [1, ['is_default', 'provider_id', 'created_at', 'updated_at']]
+                ],
+                [
+                  'from_vault',
+                  1,
+                  [
+                    1,
+                    [
+                      'provider_id',
+                      [
+                        'deployment',
+                        0,
+                        [
+                          1,
+                          [
+                            'is_default',
+                            'provider_id',
+                            'created_at',
+                            'updated_at'
+                          ]
+                        ]
+                      ],
+                      'created_at',
+                      'updated_at'
+                    ]
+                  ]
+                ],
+                [
+                  'access',
+                  0,
+                  [
+                    1,
+                    [
+                      [
+                        'owner',
+                        0,
+                        [
+                          1,
+                          [
+                            'image_url',
+                            'organization_member',
+                            ['consumer', 0, [1, ['profile_id', 'portal_id']]]
+                          ]
+                        ]
+                      ]
+                    ]
+                  ]
+                ],
+                'created_at',
+                'updated_at',
+                'public_mcp_server_id'
+              ]
+            ]
+          ]
+        ]
+      ]
+    ],
+    1
+  );
+
+export type ProviderDeploymentsConfigsListQuery = {
+  limit?: number | undefined;
+  after?: string | undefined;
+  before?: string | undefined;
+  cursor?: string | undefined;
+  order?: 'asc' | 'desc' | undefined;
+} & {
+  ownership?: 'shared' | 'usable' | 'all' | undefined;
+  status?: 'active' | 'archived' | ('active' | 'archived')[] | undefined;
+  id?: string | string[] | undefined;
+  providerId?: string | string[] | undefined;
+  providerSpecificationId?: string | string[] | undefined;
+  providerDeploymentId?: string | string[] | undefined;
+  availableForUse?: boolean | undefined;
+  availableForProviderDeploymentId?: string | undefined;
+  providerConfigVaultId?: string | string[] | undefined;
+  actorId?: string | string[] | undefined;
+  consumerId?: string | string[] | undefined;
+  identityId?: string | string[] | undefined;
+  identityCredentialId?: string | string[] | undefined;
+  search?: string | undefined;
+  createdAt?: { gt?: Date | undefined; lt?: Date | undefined } | undefined;
+  updatedAt?: { gt?: Date | undefined; lt?: Date | undefined } | undefined;
+};
+
+export let mapProviderDeploymentsConfigsListQuery =
+  /* @__PURE__ */ createMapper<ProviderDeploymentsConfigsListQuery>([
+    3,
+    [
+      [
+        0,
+        [
+          1,
+          [
+            'provider_id',
+            'provider_specification_id',
+            'provider_deployment_id',
+            'available_for_use',
+            'available_for_provider_deployment_id',
+            'provider_config_vault_id',
+            'actor_id',
+            'consumer_id',
+            'identity_id',
+            'identity_credential_id',
+            ['created_at', 1, 5],
+            ['updated_at', 1, 5]
+          ]
+        ]
+      ]
+    ]
+  ]);

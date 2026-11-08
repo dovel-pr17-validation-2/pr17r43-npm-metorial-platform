@@ -1,0 +1,15 @@
+.git
+node_modules
+dist
+.turbo
+out
+**/node_modules
+**/dist
+**/.turbo
+**/coverage
+**/Dockerfile
+**/dev.Dockerfile
+
+**/out
+**/target
+**/prisma/generated

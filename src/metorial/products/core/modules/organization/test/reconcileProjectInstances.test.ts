@@ -1,0 +1,170 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+process.env.REDIS_URL = 'redis://localhost:6379';
+
+vi.mock('@metorial/db', () => ({
+  db: {
+    instance: {
+      findMany: vi.fn(),
+      findUnique: vi.fn(),
+      updateMany: vi.fn()
+    }
+  }
+}));
+
+vi.mock('@metorial/config', () => ({
+  getConfig: () => ({
+    service: {
+      REDIS_URL: 'redis://localhost:6379'
+    }
+  })
+}));
+
+vi.mock('@metorial/queue', () => ({
+  createQueue: vi.fn().mockImplementation(config => ({
+    name: config.name,
+    add: vi.fn(),
+    addMany: vi.fn(),
+    process: vi.fn(handler => ({ handler }))
+  })),
+  combineQueueProcessors: vi.fn(processors => processors),
+  dailyPacedDelay: vi.fn(() => ({ delay: 1_000 })),
+  QueueRetryError: class QueueRetryError extends Error {
+    constructor(message?: string) {
+      super(message);
+      this.name = 'QueueRetryError';
+    }
+  }
+}));
+
+vi.mock('../src/services', () => ({
+  instanceService: {
+    generateInstanceSlug: vi.fn()
+  }
+}));
+
+const { db } = await import('@metorial/db');
+const { instanceService } = await import('../src/services');
+
+let reconcileProjectInstancesModule:
+  | typeof import('../src/queues/reconcileProjectInstances')
+  | undefined;
+
+let getModule = async () => {
+  reconcileProjectInstancesModule ??= await import('../src/queues/reconcileProjectInstances');
+  return reconcileProjectInstancesModule;
+};
+
+describe('reconcileProjectInstances queues', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('exposes a manual entrypoint that enqueues the search queue', async () => {
+    let { startProjectInstanceReconciliation, reconcileProjectInstancesSearchQueue } =
+      await getModule();
+
+    await startProjectInstanceReconciliation();
+
+    expect(reconcileProjectInstancesSearchQueue.add).toHaveBeenCalledWith(
+      {},
+      { id: 'org-instances-reconcile-search' }
+    );
+  });
+
+  it('fans out active instances into single reconcile jobs', async () => {
+    let {
+      reconcileProjectInstancesQueue,
+      reconcileProjectInstancesSearchQueue,
+      reconcileProjectInstancesSearchQueueProcessor
+    } = await getModule();
+
+    (db.instance.findMany as any).mockResolvedValue([
+      { id: 'instance-1' },
+      { id: 'instance-2' }
+    ] as any);
+
+    await (reconcileProjectInstancesSearchQueueProcessor as any).handler({});
+
+    expect(db.instance.findMany).toHaveBeenCalledWith({
+      where: {
+        status: 'active',
+        id: undefined,
+        hasBeenReconciled2: false
+      },
+      orderBy: { id: 'asc' },
+      take: 500,
+      select: { id: true }
+    });
+    expect(reconcileProjectInstancesQueue.addMany).toHaveBeenCalledWith([
+      { instanceId: 'instance-1' },
+      { instanceId: 'instance-2' }
+    ]);
+    expect(reconcileProjectInstancesSearchQueue.add).not.toHaveBeenCalled();
+  });
+
+  it('paces the next page when the page is full', async () => {
+    let {
+      RECONCILE_PROJECT_INSTANCES_BATCH_SIZE,
+      reconcileProjectInstancesSearchQueue,
+      reconcileProjectInstancesSearchQueueProcessor
+    } = await getModule();
+
+    (db.instance.findMany as any).mockResolvedValue(
+      Array.from({ length: RECONCILE_PROJECT_INSTANCES_BATCH_SIZE }, (_, index) => ({
+        id: `instance-${index}`
+      })) as any
+    );
+
+    await (reconcileProjectInstancesSearchQueueProcessor as any).handler({});
+
+    expect(reconcileProjectInstancesSearchQueue.add).toHaveBeenCalledWith(
+      { cursor: `instance-${RECONCILE_PROJECT_INSTANCES_BATCH_SIZE - 1}` },
+      expect.objectContaining({ delay: expect.any(Number) })
+    );
+  });
+
+  it('reconciles a single instance by generating a slug and updating it', async () => {
+    let { reconcileProjectInstancesQueueProcessor } = await getModule();
+
+    let instance = {
+      id: 'instance-1',
+      slug: 'old-slug',
+      oldSlug: null,
+      organization: { id: 'organization-1', slug: 'organization-one' },
+      project: { id: 'project-1', name: 'Project One' }
+    };
+
+    (db.instance.findUnique as any).mockResolvedValue(instance as any);
+    (instanceService.generateInstanceSlug as any).mockResolvedValue('new-slug' as any);
+
+    await (reconcileProjectInstancesQueueProcessor as any).handler({
+      instanceId: 'instance-1'
+    });
+
+    expect(db.instance.findUnique).toHaveBeenCalledWith({
+      where: { id: 'instance-1' },
+      include: { project: true, organization: true }
+    });
+    expect(instanceService.generateInstanceSlug).toHaveBeenCalledWith({
+      organization: instance.organization,
+      project: instance.project,
+      input: instance
+    });
+    expect(db.instance.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: 'instance-1',
+        oldSlug: null,
+        hasBeenReconciled2: false
+      },
+      data: {
+        hasBeenReconciled2: true,
+        slug: 'new-slug',
+        oldSlug: 'old-slug',
+        previousSlugs: {
+          push: 'old-slug'
+        }
+      }
+    });
+  });
+});
